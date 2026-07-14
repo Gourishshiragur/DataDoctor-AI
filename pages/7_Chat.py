@@ -74,7 +74,7 @@ with st.sidebar:
         value=True,
     )
 
-    # Do not call incident_count() while opening the page.
+    # Do not initialize RAG while opening the page.
     # This allows the Chat UI and input field to render immediately.
     st.caption("RAG memory loads after you send a message")
 
@@ -109,7 +109,7 @@ if user_input:
         st.markdown(user_input)
 
 
-    # RAG: load incident memory only after a message is submitted.
+    # Load incident memory only after a message is submitted.
     rag_context = ""
     mem_count = 0
 
@@ -201,10 +201,10 @@ if user_input:
 
             messages = [
                 {
-                    "role": m["role"],
-                    "content": m["content"],
+                    "role": message["role"],
+                    "content": message["content"],
                 }
-                for m in st.session_state.chat_history
+                for message in st.session_state.chat_history
             ]
 
 
@@ -232,7 +232,14 @@ if user_input:
                     )
 
 
-                    resp.raise_for_status()
+                    # Show Anthropic's complete API error.
+                    if not resp.ok:
+
+                        raise RuntimeError(
+                            f"Anthropic API returned "
+                            f"{resp.status_code}: "
+                            f"{resp.text}"
+                        )
 
 
                     placeholder = st.empty()
@@ -333,7 +340,14 @@ if user_input:
                     )
 
 
-                    resp.raise_for_status()
+                    # Show Anthropic's complete API error.
+                    if not resp.ok:
+
+                        raise RuntimeError(
+                            f"Anthropic API returned "
+                            f"{resp.status_code}: "
+                            f"{resp.text}"
+                        )
 
 
                     data = resp.json()
@@ -363,9 +377,9 @@ if user_input:
                     )
 
 
-            except Exception as e:
+            except Exception as error:
 
-                err = f"API error: {e}"
+                err = f"API error: {error}"
 
 
                 st.error(err)
