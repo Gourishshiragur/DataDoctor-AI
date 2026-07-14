@@ -6,3 +6,4 @@ sentence-transformers>=3.0.0
 # Pin Pillow high enough to have Python 3.14 wheels pre-built
 Pillow>=11.0.0
 numpy>=1.26.0
+torchvision
