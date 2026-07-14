@@ -1,8 +1,33 @@
+# ============================================================
+# DataDoctor AI — Enterprise Dependencies
+# ============================================================
+
+# Core application
 streamlit>=1.35.0
 requests>=2.31.0
-# RAG + vector store — no version pins so pip resolves what works on Python 3.14
+
+# Data processing and enterprise file reading
+pandas>=2.2.0
+numpy>=1.26.0
+openpyxl>=3.1.2
+pyarrow>=16.0.0
+
+# Charts and interactive enterprise analytics
+plotly>=5.22.0
+
+# PDF and document reading
+pypdf>=4.2.0
+python-docx>=1.1.2
+
+# RAG and semantic search
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
-# Pin Pillow high enough to have Python 3.14 wheels pre-built
+
+# Machine-learning utilities for anomaly detection
+scikit-learn>=1.4.0
+
+# Environment configuration
+python-dotenv>=1.0.1
+
+# Image compatibility
 Pillow>=11.0.0
-numpy>=1.26.0
