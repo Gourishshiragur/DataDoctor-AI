@@ -2,7 +2,11 @@ import pandas as pd
 import streamlit as st
 
 from core import store
-from core.retry_engine import repair_run, retry_step
+from core.retry_engine import (
+    MAX_RETRIES_PER_STEP,
+    repair_run,
+    retry_step,
+)
 from core.ui import (
     inject_global_css,
     sidebar_brand,
@@ -680,7 +684,7 @@ for run in filtered_runs:
                 )
                 != "FAILED"
 
-                or retry_count >= 3
+               or retry_count >= MAX_RETRIES_PER_STEP
 
                 or pipeline is None
 
@@ -691,7 +695,7 @@ for run in filtered_runs:
 
                 (
                     f"Retry "
-                    f"({retry_count}/3)"
+                    f"({retry_count}/{MAX_RETRIES_PER_STEP})"
                 ),
 
                 key=(

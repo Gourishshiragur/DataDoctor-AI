@@ -466,9 +466,9 @@ def save_pipeline(
         pipeline_dict
     )
 
-    record.setdefault(
-        "updated_at",
-        _utc_now(),
+    # Always refresh the modification timestamp.
+    record["updated_at"] = (
+        _utc_now()
     )
 
     _upsert_record(
@@ -540,9 +540,9 @@ def save_run(
         run_dict
     )
 
-    record.setdefault(
-        "updated_at",
-        _utc_now(),
+    # Always refresh the modification timestamp.
+    record["updated_at"] = (
+        _utc_now()
     )
 
     _upsert_record(
