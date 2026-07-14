@@ -1,10 +1,10 @@
 import streamlit as st
+import pandas as pd
 
 from core import store
 from core.retry_engine import repair_run, retry_step
 from core.ui import inject_global_css, sidebar_brand, status_badge
 
-st.set_page_config(page_title="Monitor & Repair · DataDoctor AI", page_icon="📊", layout="wide")
 inject_global_css()
 sidebar_brand()
 
@@ -25,6 +25,16 @@ status_filter = st.multiselect(
 )
 filtered = [r for r in runs if r["status"] in status_filter] if status_filter else runs
 
+st.subheader("Run history")
+st.dataframe(pd.DataFrame([{
+    "Run ID": r["id"], "Pipeline": r["pipeline_name"], "Status": r["status"],
+    "Started": r["started_at"][:19].replace("T", " "),
+    "Ended": (r.get("ended_at") or "")[:19].replace("T", " "),
+    "Steps": len(r.get("step_runs", [])),
+    "Rows processed": sum(x.get("rows_processed") or 0 for x in r.get("step_runs", [])),
+} for r in filtered]), use_container_width=True, hide_index=True)
+
+
 for run in filtered:
     pipeline = pipelines_by_id.get(run["pipeline_id"])
     with st.container(border=True):
@@ -42,6 +52,12 @@ for run in filtered:
                     updated = repair_run(run, pipeline)
                 st.success(f"Repair finished — status now {updated['status']}.")
                 st.rerun()
+
+        step_rows = []
+        for sr in run["step_runs"]:
+            meta = next((x for x in (pipeline or {}).get("steps", []) if x["id"] == sr["step_id"]), {})
+            step_rows.append({"Step": meta.get("name", sr["step_id"]), "Type": meta.get("step_type", "—"), "Engine": meta.get("engine", "—"), "Status": sr["status"], "Rows": sr.get("rows_processed") or 0, "Retries": sr.get("retry_count", 0), "Error": sr.get("error_message") or ""})
+        st.dataframe(pd.DataFrame(step_rows), use_container_width=True, hide_index=True)
 
         for sr in run["step_runs"]:
             step_meta = None

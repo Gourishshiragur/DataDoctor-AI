@@ -6,7 +6,6 @@ import streamlit as st
 from core import store
 from core.ui import inject_global_css, sidebar_brand
 
-st.set_page_config(page_title="Analytics · DataDoctor AI", page_icon="📈", layout="wide")
 inject_global_css()
 sidebar_brand()
 

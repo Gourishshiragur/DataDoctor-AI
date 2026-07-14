@@ -6,7 +6,6 @@ from core.rag_memory import incident_count, retrieve_similar
 from core.retry_engine import retry_step
 from core.ui import inject_global_css, sidebar_brand, status_badge
 
-st.set_page_config(page_title="AI Agent · DataDoctor AI", page_icon="🧠", layout="wide")
 inject_global_css()
 sidebar_brand()
 
@@ -18,12 +17,7 @@ st.caption(
 )
 
 # RAG memory stats
-mem_count = incident_count()
-st.info(
-    f"🗄️ RAG Memory: **{mem_count}** resolved incident(s) stored. "
-    "The agent retrieves similar ones before reasoning. "
-    + ("Run some pipelines and let the agent fix them to build memory." if mem_count == 0 else "")
-)
+st.info("🧠 Agent workflow: select a failed step → diagnose → review the proposed fix → apply, retry, and learn. RAG memory is loaded only when diagnosis is requested so the page stays responsive.")
 
 runs = sorted(store.load_runs(), key=lambda r: r["started_at"], reverse=True)
 pipelines_by_id = {p["id"]: p for p in store.load_pipelines()}
@@ -40,7 +34,17 @@ for run in runs:
                 failed_steps.append((run, pipeline, step, sr))
 
 if not failed_steps:
-    st.success("No failed steps found. Create and run a pipeline from **Pipeline Builder**.")
+    st.warning("No failed steps are available for diagnosis yet.")
+    st.markdown("""
+**What this module does**
+
+1. **Observe** — reads the failed step code, error, and execution logs.
+2. **Reason** — retrieves similar incidents and uses the configured LLM when available; otherwise it uses the zero-cost local diagnostic engine.
+3. **Act** — proposes corrected code. Nothing changes until you confirm.
+4. **Retry & learn** — applies the approved fix, retries the step, and stores the incident for future retrieval.
+
+To test it: open **Pipeline Builder**, run **Idempotent micro-batch upsert** several times until a step fails, then return here.
+""")
     st.stop()
 
 labels = [
@@ -63,20 +67,7 @@ with col2:
             color = {"ERROR": "red", "WARN": "orange", "INFO": "gray"}.get(l["level"], "gray")
             st.markdown(f":{color}[{l['level']}] {l['message']}")
 
-# Show similar past incidents from RAG memory before diagnosis
-st.divider()
-similar_preview = retrieve_similar(
-    f"{step_run.get('error_message', '')} {step.get('code', '')[:150]}", k=3
-)
-if similar_preview:
-    with st.expander(f"📚 RAG Memory — {len(similar_preview)} similar past incident(s) found"):
-        for i, r in enumerate(similar_preview, 1):
-            src_badge = "🧠 ChromaDB" if r.source == "chroma" else "📄 Fallback store"
-            st.markdown(f"**Incident {i}** · similarity `{r.similarity_score:.2f}` · {src_badge}")
-            st.markdown(f"_Error:_ {r.incident.error_message}")
-            st.markdown(f"_Root cause:_ {r.incident.root_cause}")
-            st.markdown(f"_Fix applied:_ `{r.incident.fix_applied[:200]}`")
-            st.divider()
+# RAG retrieval is performed inside the diagnosis workflow, not during page load.
 
 st.divider()
 use_streaming = st.toggle("Stream response token-by-token", value=True)
@@ -116,7 +107,7 @@ if diagnosis:
 
     src_label = {
         "claude-api": "✅ Claude API (tool-augmented)",
-        "rule-based": "ℹ️ Rule-based fallback (no ANTHROPIC_API_KEY)",
+        "rule-based": "🟢 Zero-cost local diagnostic engine",
         "streaming": "✅ Claude API (streaming)",
     }.get(diagnosis.source, diagnosis.source)
     st.caption(src_label)

@@ -10,381 +10,221 @@ Cloud at zero cost.
 
 ---
 
-## Skills Demonstrated
+## Skills demonstrated
 
-| Skill                                         | Implementation                                                                         |
-| --------------------------------------------- | -------------------------------------------------------------------------------------- |
-| **Agentic AI (Observe → Reason → Act)**       | `core/agent.py` — multi-step reasoning and action loop rather than a single LLM prompt |
-| **RAG (Retrieval-Augmented Generation)**      | `core/rag_memory.py` — semantic retrieval over previously resolved pipeline incidents  |
-| **Vector Database (ChromaDB)**                | `core/rag_memory.py` — persistent in-process vector store                              |
-| **Embeddings (Sentence Transformers)**        | `core/rag_memory.py` — `all-MiniLM-L6-v2` embedding model                              |
-| **Tool / Function Calling**                   | `core/agent.py` — `search_past_incidents`, `explain_error`, and `suggest_optimization` |
-| **Streaming LLM Responses**                   | `core/agent.py` `diagnose_stream()` + `pages/7_Chat.py`                                |
-| **Multi-Turn Conversation**                   | `pages/7_Chat.py` — conversation history with RAG context injection                    |
-| **LLM API Integration**                       | `core/ai_assistant.py` + `core/agent.py` — Claude API integration                      |
-| **Data Pipeline Orchestration**               | `core/pipeline_engine.py` — DAG execution, dependency ordering, and retry handling     |
-| **Delta Lake / Medallion Architecture**       | Pipeline templates, agent context, and generated code suggestions                      |
-| **PySpark / SCD Type 2 / Streaming Patterns** | Pipeline templates, AI code assistant, and agent-generated remediation suggestions     |
+| Skill | Where |
+|---|---|
+| **Agentic AI (observe→reason→act)** | `core/agent.py` — multi-step loop, not a single prompt |
+| **RAG (Retrieval-Augmented Generation)** | `core/rag_memory.py` — semantic search over past incidents |
+| **Vector database (ChromaDB)** | `core/rag_memory.py` — persistent in-process vector store |
+| **Embeddings (sentence-transformers)** | `core/rag_memory.py` — `all-MiniLM-L6-v2` model |
+| **Tool calling / function calling** | `core/agent.py` — `search_past_incidents`, `explain_error`, `suggest_optimization` |
+| **Streaming LLM responses** | `core/agent.py` `diagnose_stream()` + `pages/7_Chat.py` |
+| **Multi-turn conversation** | `pages/7_Chat.py` — full message history + RAG context injection |
+| **LLM API integration** | `core/ai_assistant.py` + `core/agent.py` — Claude API |
+| **Data pipeline orchestration** | `core/pipeline_engine.py` — DAG, dependency ordering, retry |
+| **Delta Lake / Medallion architecture** | Templates, agent system prompt, code suggestions |
+| **PySpark / SCD2 / streaming patterns** | Templates, code assistant, agent fix suggestions |
 
-All Generative AI capabilities degrade gracefully. When an API key is unavailable, the application uses rule-based fallbacks and local vector retrieval, allowing the complete workflow to remain functional and demoable at zero cost.
+All GenAI features degrade gracefully: no API key → rule-based fallback + local vector store.
+The app is fully functional and demoable at zero cost.
 
 ---
 
 ## Features
 
 ### 🛠️ Pipeline Builder
-
-Visual pipeline-step composer supporting source, transformation, and sink stages with explicit DAG dependencies.
-
-Includes one-click templates for:
-
-* Bronze–Silver–Gold batch processing
-* Idempotent micro-batch upserts
-* SCD Type 2 dimension processing
-* SQL-based aggregations
+Visual step composer: source → transform → sink steps with explicit DAG dependencies.
+One-click templates: Bronze/Silver/Gold batch, idempotent micro-batch upsert, SCD2
+dimension load, SQL-only aggregation.
 
 ### 📊 Monitor & Repair
-
-Provides per-run and per-step execution status.
-
-Users can retry an individual failed step or use **Repair Run** to re-execute only failed and skipped steps while preserving successfully completed steps. This demonstrates a recovery pattern similar to Databricks Jobs repair runs and Azure Data Factory rerun-from-failure workflows.
+Per-run step status, retry a single failed step, or "Repair run" to re-execute only
+failed/skipped steps while leaving succeeded steps untouched — same pattern as Databricks
+Jobs "repair run" and ADF rerun-from-failure.
 
 ### 📈 Analytics
+Run trends over time, success rate, failure reasons auto-grouped by exception type,
+per-pipeline reliability scoring.
 
-Provides operational pipeline metrics, including:
+### 🧠 AI Agent Console ← core GenAI feature
+Full agentic loop with RAG, tool calling, and streaming:
 
-* Execution trends over time
-* Pipeline success rates
-* Failure reasons grouped by exception type
-* Per-pipeline reliability scoring
+1. **OBSERVE** — gathers failed step's code, error, logs + retrieves semantically similar
+   past incidents from the RAG vector store (ChromaDB + sentence-transformers)
+2. **REASON** — Claude API with tool calling: the model invokes `search_past_incidents`,
+   `explain_error`, and `suggest_optimization` as needed before producing a diagnosis
+3. **ACT** — on confirmation, patches the step code + retries + stores the resolved incident
+   back to RAG memory (so future diagnoses get richer context over time)
 
-### 🧠 AI Agent Console — Core Generative AI Feature
-
-Implements an agentic workflow using RAG, tool calling, streaming responses, and human confirmation.
-
-1. **OBSERVE** — Collects the failed step's code, exception details, and execution logs. It also retrieves semantically similar historical incidents from the RAG vector store using ChromaDB and Sentence Transformers.
-
-2. **REASON** — Uses the Claude API with tool calling. The agent can invoke `search_past_incidents`, `explain_error`, and `suggest_optimization` before generating a diagnosis and recommended remediation.
-
-3. **ACT** — After user confirmation, the agent applies the proposed code patch, retries the failed step, and stores the resolved incident in RAG memory so future diagnoses can use the newly learned context.
-
-Responses are streamed token by token, and diagnosis confidence is surfaced as **High**, **Medium**, or **Low**.
+Responses stream token-by-token. Confidence levels (high/medium/low) are surfaced clearly.
 
 ### 💬 Conversational AI
-
-Multi-turn AI assistant with conversation history and RAG context injection.
-
-For every user query, relevant historical pipeline incidents are retrieved and added to the LLM context before response generation.
-
-The assistant supports discussions related to:
-
-* Apache Spark
-* PySpark
-* Delta Lake
-* SCD Type 2
-* Azure Data Factory
-* Batch and streaming architectures
-* Pipeline failures and optimization
+Multi-turn chat with persistent message history. Each user message triggers RAG retrieval —
+relevant past incidents are injected as system context before the LLM responds. Streaming
+responses. Covers Spark, Delta Lake, SCD2, ADF, streaming architecture questions.
 
 ### 🤖 AI Code Assistant
+Single-turn PySpark/SQL snippet generation with common pattern library as local fallback.
 
-Generates PySpark and SQL code snippets using an LLM when an API key is available and a local pattern library as a fallback.
-
-Supported patterns include:
-
-* Data deduplication
-* Incremental processing
-* Delta MERGE
-* SCD Type 2
-* Streaming transformations
-* Data-quality validation
-
-### 📜 Execution Logs
-
-Provides structured and filterable pipeline execution logs with severity levels.
-
-Logs can be exported in JSON Lines (`.jsonl`) format for further analysis.
+### 📜 Logs
+Structured, filterable per-run execution logs with severity levels. Downloadable as JSONL.
 
 ---
 
-## Deploy on Streamlit Community Cloud
+## Free deployment on Streamlit Community Cloud
 
-1. Go to **[share.streamlit.io](https://share.streamlit.io)** and sign in using GitHub.
+### Step 1 — Push to GitHub
 
-2. Click **New app**.
+```bash
+cd datadoctor-ai
+git init
+git add .
+git commit -m "DataDoctor AI — initial deploy"
+# Create a new repo on GitHub (can be public or private)
+git remote add origin https://github.com/YOUR_USERNAME/datadoctor-ai.git
+git push -u origin main
+```
 
-3. Configure the deployment:
+### Step 2 — Deploy on Streamlit Community Cloud
 
-   * Repository: `Gourishshiragur/DataDoctor-AI`
-   * Branch: `main`
-   * Main file path: `app.py`
+1. Go to **[share.streamlit.io](https://share.streamlit.io)** — sign in with GitHub
+2. Click **"New app"**
+3. Set:
+   - Repository: `YOUR_USERNAME/datadoctor-ai`
+   - Branch: `main`
+   - Main file path: `app.py`
+4. Click **"Deploy"** — Streamlit installs `requirements.txt` automatically
 
-4. Click **Deploy**.
+First deploy takes ~3-5 minutes (sentence-transformers model downloads on first AI Agent use).
 
-Streamlit Community Cloud automatically installs the dependencies defined in `requirements.txt`.
+### Step 3 — Add your API key (optional but recommended)
 
-The first deployment may take approximately **3–5 minutes** because the Sentence Transformers embedding model is downloaded during initial use.
-
-### Configure the Claude API Key — Optional
-
-In the deployed Streamlit application, open:
-
-**Settings (⋮) → Secrets**
-
-Add:
+In your deployed app: **Settings (⋮) → Secrets**, add:
 
 ```toml
-ANTHROPIC_API_KEY = "your-api-key"
+ANTHROPIC_API_KEY = "sk-ant-..."
 ```
 
-Without an API key, the application remains functional using rule-based AI fallbacks and local vector retrieval.
+Without this: the app runs fully with rule-based fallbacks + local vector store.
+With this: Claude API powers live diagnosis, code suggestions, and chat.
 
-With an API key, the Claude API enables live agent diagnosis, contextual code suggestions, and conversational AI responses.
+You can get a free API key at **[console.anthropic.com](https://console.anthropic.com)** —
+new accounts include free credits.
 
-Create and manage API keys through the Anthropic Console.
+### Step 4 — Your public URL
 
-### Add the Live Application to Your Portfolio
+Your app is now live at:
+```
+https://YOUR_USERNAME-datadoctor-ai-app-XXXXX.streamlit.app
+```
 
-After deployment, copy the generated Streamlit application URL.
-
-Add the URL to the DataDoctor AI project's `demo` field in your portfolio configuration and push the update to GitHub. The **Live Demo ↗** link will then appear in the portfolio.
+Add this URL to your portfolio site's `js/data.js` under the DataDoctor AI project's
+`demo` field and push — the "Live demo ↗" link appears automatically.
 
 ---
 
-## Local Setup
-
-Clone the repository:
+## Local setup (for testing before deploy)
 
 ```bash
-git clone https://github.com/Gourishshiragur/DataDoctor-AI.git
-cd DataDoctor-AI
-```
-
-Create and activate a Python virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-```
-
-Install the required dependencies:
-
-```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-Optional: configure the Claude API key for live AI capabilities:
-
-```bash
+# Optional: add API key for live AI features
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-```
+# Edit .streamlit/secrets.toml: ANTHROPIC_API_KEY = "sk-ant-..."
 
-Update `.streamlit/secrets.toml`:
-
-```toml
-ANTHROPIC_API_KEY = "your-api-key"
-```
-
-Start the application:
-
-```bash
 streamlit run app.py
-```
-
-The application will be available locally at:
-
-```text
-http://localhost:8501
+# Opens at http://localhost:8501
 ```
 
 ---
 
-## Testing the Application
+## Testing the app (step-by-step demo script)
 
-### 1. Create and Run a Pipeline
+### 1. Create and run a pipeline that will fail
 
-* Open **Pipeline Builder**.
-* Select **Use Template → Idempotent Micro-Batch Upsert**.
-* Click **Save Pipeline**.
-* Enter a pipeline name, such as `telemetry-ingest`.
-* Select the saved pipeline and start a run.
-* The execution engine may intentionally generate a realistic pipeline failure for demonstration.
+- Go to **Pipeline Builder**
+- Click "Use template" → **Idempotent micro-batch upsert**
+- Click "Save pipeline", give it a name (e.g. "telemetry-ingest")
+- From the "Run a saved pipeline" dropdown, run it
+- Some steps will fail (the engine intentionally simulates realistic failures)
 
-### 2. Monitor and Repair the Pipeline
+### 2. Monitor and repair
 
-* Open **Monitor & Repair**.
-* Review the execution status of each pipeline step.
-* Select **Repair Run**.
-* Only failed and skipped steps are re-executed; successfully completed steps remain unchanged.
+- Go to **Monitor & Repair**
+- You'll see the failed run with per-step status
+- Try "Repair run" — re-runs only failed/skipped steps, leaves succeeded ones untouched
 
-### 3. Diagnose a Failure with the AI Agent
+### 3. AI Agent diagnosis (the main feature)
 
-* Open **AI Agent Console**.
-* Select a failed pipeline step.
-* Enable response streaming.
-* Click **Diagnose with Agent**.
-* Review:
+- Go to **AI Agent Console**
+- Select a failed step from the dropdown
+- Click "Diagnose with agent" with streaming ON
+  - Watch tokens arrive in real time
+  - See RAG memory hits if any similar incidents exist
+  - See which tools the agent called (search, explain, suggest)
+- Click "Apply fix, retry & learn"
+  - The step is retried with the proposed fix
+  - The incident is stored to RAG memory
 
-  * The streamed diagnosis
-  * Similar incidents retrieved through RAG
-  * Tools invoked by the agent
-  * Root-cause analysis
-  * Recommended remediation
-  * Diagnosis confidence
+### 4. RAG memory in action (run a second pipeline)
 
-Click **Apply Fix, Retry & Learn**.
+- Create and run another pipeline with a similar error
+- Go back to AI Agent → the RAG panel will now show past similar incidents
+- The diagnosis prompt will include that retrieved context — this is the RAG loop working
 
-The application then:
+### 5. Conversational AI
 
-* Applies the proposed remediation
-* Retries the failed pipeline step
-* Stores the resolved incident in RAG memory
+- Go to **💬 Conversational AI**
+- Ask: "How do I implement SCD Type 2 with Spark Structured Streaming?"
+- Ask: "I got an AnalysisException: cannot resolve column 'device_id'. What's wrong?"
+- With RAG toggle ON — if you have incidents stored, they appear as injected context
 
-### 4. Validate RAG Memory
+### 6. AI Code Assistant
 
-* Create and run another pipeline with a similar failure.
-* Return to **AI Agent Console**.
-* Review the retrieved historical incidents in the RAG panel.
-* The previously resolved incident is injected into the diagnosis context.
-
-This demonstrates the complete retrieval and learning workflow:
-
-```text
-Pipeline Failure
-       ↓
-Incident Embedding
-       ↓
-Vector Storage
-       ↓
-Semantic Retrieval
-       ↓
-Context-Augmented Diagnosis
-       ↓
-Resolution Stored for Future Retrieval
-```
-
-### 5. Test Conversational AI
-
-Open **💬 Conversational AI** and try:
-
-```text
-How do I implement SCD Type 2 with Spark Structured Streaming?
-```
-
-```text
-I received an AnalysisException because Spark cannot resolve the device_id column. What could be wrong?
-```
-
-When RAG is enabled, relevant stored incidents are retrieved and injected into the conversation context.
-
-### 6. Test the AI Code Assistant
-
-Open **🤖 AI Code Assistant** and try:
-
-```text
-Deduplicate records using a natural key while retaining the latest event.
-```
-
-```text
-Generate an SCD Type 2 Delta MERGE to close the previous record and create a new version when the status changes.
-```
+- Go to **🤖 AI Code Assistant**
+- Try "deduplicate on natural key keeping the latest event time"
+- Try "SCD Type 2 merge to close and open a version on status change"
+- Click the example buttons
 
 ---
 
 ## Architecture
 
-```text
-app.py                                  Streamlit dashboard
-│
+```
+app.py  (Dashboard)
 ├── pages/
-│   ├── 1_Pipeline_Builder.py           DAG composer and pipeline templates
-│   ├── 2_Monitor_and_Repair.py         Run monitoring, retry, and repair
-│   ├── 3_AI_Code_Assistant.py          PySpark and SQL generation
-│   ├── 5_AI_Agent.py                   Agentic AI workflow with RAG and tools
-│   ├── 6_Analytics.py                  Pipeline trends and reliability metrics
-│   └── 7_Chat.py                       Multi-turn conversational AI
-│
+│   ├── 1_Pipeline_Builder.py      DAG composer + templates
+│   ├── 2_Monitor_and_Repair.py    Run monitor, retry, repair
+│   ├── 3_AI_Code_Assistant.py     PySpark/SQL snippet gen
+│   ├── 5_AI_Agent.py              Agentic loop UI (RAG + tools + streaming)
+│   ├── 6_Analytics.py             Run trends + reliability
+│   └── 7_Chat.py                  Multi-turn conversational AI
 └── core/
-    ├── models.py                       Pipeline, step, and run data models
-    ├── store.py                        JSON-based application persistence
-    ├── pipeline_engine.py              Simulated DAG execution engine
-    ├── retry_engine.py                 Step retry and repair logic
-    ├── templates.py                    Reusable pipeline templates
-    ├── rag_memory.py                   ChromaDB, embeddings, and retrieval
-    ├── agent.py                        Agent loop, tools, streaming, and RAG
-    ├── ai_assistant.py                 AI-assisted code generation
-    └── ui.py                           Shared UI styles and status components
+    ├── models.py                   Pipeline/Step/Run dataclasses
+    ├── store.py                    JSON file persistence
+    ├── pipeline_engine.py          DAG execution engine (simulated)
+    ├── retry_engine.py             Retry + repair logic
+    ├── templates.py                One-click pipeline templates
+    ├── rag_memory.py               ← RAG: ChromaDB + embeddings (cosine fallback)
+    ├── agent.py                    ← Agentic loop: tools + streaming + RAG
+    ├── ai_assistant.py             Code snippet generation
+    └── ui.py                       Shared styles + status badges
 ```
 
----
+## Why simulated execution
 
-## Why Pipeline Execution Is Simulated
+`core/pipeline_engine.py` simulates step execution rather than running a real Spark cluster —
+a free-tier web app cannot host Spark. The orchestration, retry, repair, RAG, and agent
+mechanics behave exactly as they would against a real backend. To connect to a real Databricks
+cluster, replace `_execute_step()` in `pipeline_engine.py` with a Databricks Jobs API call —
+every other module is unchanged.
 
-`core/pipeline_engine.py` simulates pipeline-step execution rather than starting a real Apache Spark cluster.
+## Notes on persistence
 
-Streamlit Community Cloud is designed for lightweight web applications and cannot host a production Databricks or distributed Spark environment. The project therefore focuses on demonstrating the operational control layer:
-
-* DAG-based orchestration
-* Dependency management
-* Pipeline monitoring
-* Step-level retry
-* Repair-run behavior
-* AI-assisted root-cause analysis
-* RAG-based incident retrieval
-* Tool-assisted remediation
-* Human-approved recovery workflows
-
-The execution backend is intentionally abstracted.
-
-To integrate the application with Azure Databricks, replace the simulated `_execute_step()` implementation in `core/pipeline_engine.py` with Databricks Jobs API calls. The monitoring, retry, repair, RAG, and agent layers can remain largely unchanged.
-
----
-
-## Persistence Limitations
-
-Streamlit Community Cloud uses an ephemeral filesystem.
-
-Pipeline definitions, execution history, logs, and RAG incidents created through the application may be lost when the application restarts or is redeployed.
-
-This limitation is documented in the application UI.
-
-For durable production persistence:
-
-* Replace the JSON implementation in `core/store.py` with PostgreSQL or another managed database.
-* Replace the local vector store in `core/rag_memory.py` with a managed vector database.
-* Store secrets using a secure secrets manager.
-* Add authentication and role-based access control.
-* Integrate with a production pipeline execution platform.
-
-These changes can be implemented without redesigning the application's agent, monitoring, or recovery workflows.
-
----
-
-## Project Scope
-
-DataDoctor AI is a portfolio and architecture demonstration project. It is designed to showcase the integration of:
-
-* Data Engineering
-* Pipeline orchestration
-* Agentic AI
-* Retrieval-Augmented Generation
-* Vector search
-* LLM tool calling
-* Streaming AI responses
-* Automated diagnosis
-* Human-in-the-loop remediation
-* Operational analytics
-
-The application demonstrates an extensible architecture for an AI-assisted DataOps platform while remaining deployable using free-tier infrastructure.
-
+Streamlit Community Cloud's filesystem resets on redeploy/restart — pipelines, run history,
+and RAG memory built up in the UI will be lost. This is expected and noted in the UI. For
+durable storage, swap `core/store.py` for a Supabase Postgres free tier and `core/rag_memory.py`
+for a hosted vector DB (Pinecone free tier, Weaviate Cloud free tier) — neither requires
+changes to any other module.

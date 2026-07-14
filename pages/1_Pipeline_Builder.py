@@ -6,7 +6,6 @@ from core.pipeline_engine import run_pipeline
 from core.templates import get_templates
 from core.ui import inject_global_css, sidebar_brand
 
-st.set_page_config(page_title="Pipeline Builder · DataDoctor AI", page_icon="🛠️", layout="wide")
 inject_global_css()
 sidebar_brand()
 
