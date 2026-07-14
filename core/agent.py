@@ -1,131 +1,330 @@
 """
-Agent layer — full agentic loop with RAG, tool calling, and streaming.
+DataDoctor AI — Enterprise Agent Layer
 
-Skills demonstrated:
-  RAG          : retrieve_similar() pulls semantically-matched past incidents
-                 before the LLM reasons, so the agent has "memory" of prior fixes
-  Tool calling : the agent is given a tool registry; Claude decides which tools
-                 to invoke (search_incidents, explain_error, suggest_optimization)
-                 and the runner executes them, feeding results back
-  Streaming    : LLM tokens are yielded in real time via a generator so the UI
-                 can display them as they arrive rather than waiting for the full response
-  Agentic loop : observe (gather context + RAG) → reason (tool calls + LLM) → act
-                 (apply fix + store to RAG memory so future agents learn from this)
+Agentic workflow:
 
-All features degrade gracefully: no API key → rule-based diagnoses + fallback vector
-store. The app never crashes due to a missing dependency.
+OBSERVE
+- Read pipeline, failed step, logs, retry information, and code.
+- Retrieve semantically similar resolved incidents from RAG memory.
+
+REASON
+- Use the free local Ollama provider when available.
+- Ground the model with pipeline context and incident memory.
+- Fall back to deterministic diagnostic rules when Ollama is unavailable.
+
+ACT
+- Generate corrected code.
+- Apply approved fixes to pipeline definitions.
+- Store resolved incidents in RAG memory so future diagnoses can reuse them.
+
+Design goals:
+- No paid API required
+- Free local Ollama support
+- RAG incident memory
+- Graceful offline fallback
+- Existing agent-page compatibility
+- Existing apply-fix workflow preserved
 """
-import json
+
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Generator, List, Optional
-
-import requests
+from typing import Any, Dict, Generator, List
 
 from core import store
-from core.ai_assistant import _get_api_key, ANTHROPIC_API_URL, MODEL
-from core.rag_memory import Incident, MemoryResult, incident_count
-from core.rag_memory import retrieve_similar, store_incident
+
+from core.ai_assistant import (
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    ask_data_doctor,
+)
+
+from core.rag_memory import (
+    Incident,
+    MemoryResult,
+    retrieve_similar,
+    store_incident,
+)
 
 
-# ─────────────────────────────────────────────
-# Tool registry
-# ─────────────────────────────────────────────
+# ============================================================
+# Agent tool registry
+# ============================================================
+
 TOOLS = [
     {
         "name": "search_past_incidents",
         "description": (
-            "Search the RAG memory store for past pipeline incidents that are semantically "
-            "similar to the current error. Returns up to 3 resolved incidents with their "
-            "root cause and the fix that was applied. Use this first before reasoning from scratch."
+            "Search incident RAG memory for semantically "
+            "similar resolved pipeline failures."
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural-language description of the error or symptom to search for.",
-                }
-            },
-            "required": ["query"],
-        },
     },
     {
         "name": "explain_error",
-        "description": "Return a plain-English explanation of a PySpark or Delta Lake exception class name.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "exception_class": {
-                    "type": "string",
-                    "description": "The exception class name, e.g. 'AnalysisException', 'OutOfMemoryError'.",
-                }
-            },
-            "required": ["exception_class"],
-        },
+        "description": (
+            "Explain common Spark, PySpark, Delta Lake, "
+            "streaming, schema, and infrastructure errors."
+        ),
     },
     {
         "name": "suggest_optimization",
         "description": (
-            "Given a PySpark code snippet, return concrete performance-tuning suggestions "
-            "(partition pruning, broadcast joins, Z-Ordering, caching) relevant to the code."
+            "Inspect PySpark code and return relevant "
+            "performance recommendations."
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "The PySpark code to analyze."}
-            },
-            "required": ["code"],
-        },
     },
 ]
 
-AGENT_SYSTEM_PROMPT = """You are DataDoctor AI — an autonomous data-pipeline diagnostic agent \
-embedded in a Lakehouse ops console.
 
-You have access to tools. Always call search_past_incidents FIRST using the error message as \
-the query — past incidents may already contain the exact fix. Only call explain_error if the \
-exception class is unfamiliar. Call suggest_optimization if the fix involves performance tuning.
+AGENT_SYSTEM_PROMPT = """
+You are DataDoctor AI, an enterprise data-pipeline diagnostic
+and remediation agent.
 
-After tool results are available, produce your final diagnosis in exactly this format:
+Analyze only the supplied pipeline evidence.
 
-ROOT_CAUSE: <one or two sentences>
-CONFIDENCE: <low|medium|high>
+Use:
+- Failed-step error
+- Pipeline metadata
+- Step code
+- Retry information
+- Recent logs
+- Retrieved incident-memory context
+
+Do not invent:
+- Tables
+- Columns
+- Pipeline executions
+- Business values
+- Metrics
+- Root causes unsupported by evidence
+
+Return exactly:
+
+ROOT_CAUSE: one or two evidence-based sentences
+
+CONFIDENCE: low, medium, or high
+
 FIXED_CODE:
-```
-<corrected code>
-```
-"""
+corrected complete code
+
+BUSINESS_IMPACT:
+short operational impact
+
+VALIDATION:
+specific checks required after applying the fix
+""".strip()
+
+
+# ============================================================
+# Known error explanations
+# ============================================================
 
 ERROR_EXPLANATIONS = {
-    "AnalysisException": "Spark could not resolve a column, function, or table name at analysis time — usually a schema mismatch, missing alias, or wrong column name.",
-    "OutOfMemoryError": "A JVM executor ran out of heap memory — typically during a large shuffle, skewed join, or when too much data is collected to the driver.",
-    "DeltaConcurrentModificationException": "Two writers tried to modify the same Delta table partition simultaneously — optimistic concurrency control rejected one write.",
-    "TimeoutException": "A network call or Spark operation exceeded the configured time limit — can indicate a slow source, cluster under-provisioning, or a stalled task.",
-    "StreamingQueryException": "The Spark Structured Streaming query encountered an unrecoverable error — check the cause field for the underlying exception.",
-    "SchemaEvolutionException": "The incoming data schema is incompatible with the existing Delta table schema in a way that cannot be auto-merged — requires schema migration.",
+    "AnalysisException": (
+        "Spark could not resolve a column, function, table, "
+        "or expression during logical-plan analysis. Common "
+        "causes include schema mismatch, missing aliases, "
+        "incorrect column names, and ambiguous references."
+    ),
+    "OutOfMemoryError": (
+        "A JVM executor or driver exhausted available heap "
+        "memory. Common causes include large shuffles, data "
+        "skew, oversized partitions, collect operations, or "
+        "insufficient executor resources."
+    ),
+    "DeltaConcurrentModificationException": (
+        "Concurrent operations modified overlapping Delta "
+        "Lake files or partitions. Optimistic concurrency "
+        "control rejected one transaction."
+    ),
+    "ConcurrentModificationException": (
+        "Multiple operations attempted to modify the same "
+        "data or metadata concurrently."
+    ),
+    "TimeoutException": (
+        "A source request, Spark operation, network call, or "
+        "broadcast operation exceeded its configured timeout."
+    ),
+    "StreamingQueryException": (
+        "A Structured Streaming query encountered an "
+        "unrecoverable error. The nested cause and checkpoint "
+        "state should be inspected."
+    ),
+    "SchemaEvolutionException": (
+        "Incoming data is incompatible with the existing "
+        "target schema and cannot be merged automatically."
+    ),
+    "FileNotFoundException": (
+        "An expected source, checkpoint, configuration, or "
+        "data file could not be found."
+    ),
+    "Py4JJavaError": (
+        "A JVM-side Spark exception was propagated through "
+        "the Python-to-Java Py4J bridge. The nested Java "
+        "exception contains the actual cause."
+    ),
 }
 
+
+# ============================================================
+# Deterministic diagnostic rules
+# ============================================================
+
 RULE_BASED_DIAGNOSES = [
-    {"match": "column 'device_id' not found",
-     "root_cause": "The upstream schema doesn't contain 'device_id' at this stage — likely a rename or select upstream.",
-     "confidence": "medium",
-     "fix_hint": "df = df.withColumnRenamed('deviceId', 'device_id')\nassert 'device_id' in df.columns"},
-    {"match": "Delta MERGE conflict",
-     "root_cause": "A concurrent writer touched the same Delta table partitions during this MERGE, causing an optimistic concurrency failure.",
-     "confidence": "high",
-     "fix_hint": "for attempt in range(3):\n    try:\n        target.alias('t').merge(source.alias('s'), condition).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()\n        break\n    except Exception:\n        if attempt == 2: raise\n        import time; time.sleep(2 ** attempt)"},
-    {"match": "OutOfMemoryError",
-     "root_cause": "Executor OOM during shuffle — likely skewed data or too-large a collect() call.",
-     "confidence": "medium",
-     "fix_hint": "spark.conf.set('spark.sql.shuffle.partitions', '200')\ndf = df.join(broadcast(small_df), on='device_id')"},
-    {"match": "TimeoutException",
-     "root_cause": "Source read exceeded the configured timeout.",
-     "confidence": "low",
-     "fix_hint": "spark.conf.set('spark.sql.broadcastTimeout', '600')"},
+    {
+        "patterns": [
+            "column 'device_id' not found",
+            "cannot resolve 'device_id'",
+            "cannot resolve `device_id`",
+            "unresolved column",
+        ],
+        "root_cause": (
+            "The failed transformation references a column "
+            "that is unavailable at this stage. The source "
+            "schema may use another name, or an earlier "
+            "select, join, aggregation, or rename operation "
+            "may have removed the required column."
+        ),
+        "confidence": "medium",
+        "fix_hint": (
+            "# Validate the source schema before using "
+            "device_id\n"
+            "required_columns = ['device_id']\n"
+            "missing_columns = [\n"
+            "    column\n"
+            "    for column in required_columns\n"
+            "    if column not in df.columns\n"
+            "]\n\n"
+            "if missing_columns:\n"
+            "    raise ValueError(\n"
+            "        f'Missing required columns: "
+            "{missing_columns}. '\n"
+            "        f'Available columns: {df.columns}'\n"
+            "    )"
+        ),
+    },
+    {
+        "patterns": [
+            "delta merge conflict",
+            "deltaconcurrentmodificationexception",
+            "concurrent modification",
+            "concurrentmodificationexception",
+        ],
+        "root_cause": (
+            "Another writer modified overlapping Delta files "
+            "or partitions while the MERGE operation was "
+            "running. Delta optimistic concurrency control "
+            "rejected the conflicting transaction."
+        ),
+        "confidence": "high",
+        "fix_hint": (
+            "import time\n\n"
+            "maximum_attempts = 3\n\n"
+            "for attempt in range(maximum_attempts):\n"
+            "    try:\n"
+            "        (\n"
+            "            target.alias('target')\n"
+            "            .merge(\n"
+            "                source.alias('source'),\n"
+            "                merge_condition,\n"
+            "            )\n"
+            "            .whenMatchedUpdateAll()\n"
+            "            .whenNotMatchedInsertAll()\n"
+            "            .execute()\n"
+            "        )\n"
+            "        break\n\n"
+            "    except Exception:\n"
+            "        if attempt == maximum_attempts - 1:\n"
+            "            raise\n\n"
+            "        time.sleep(2 ** attempt)"
+        ),
+    },
+    {
+        "patterns": [
+            "outofmemoryerror",
+            "java heap space",
+            "gc overhead limit exceeded",
+        ],
+        "root_cause": (
+            "Spark exhausted available JVM memory during a "
+            "memory-intensive operation. Large shuffle "
+            "partitions, data skew, oversized joins, caching, "
+            "or driver-side collection may be contributing."
+        ),
+        "confidence": "medium",
+        "fix_hint": (
+            "# Review partition size and skew before changing "
+            "cluster resources.\n"
+            "spark.conf.set(\n"
+            "    'spark.sql.adaptive.enabled',\n"
+            "    'true',\n"
+            ")\n\n"
+            "spark.conf.set(\n"
+            "    'spark.sql.adaptive.skewJoin.enabled',\n"
+            "    'true',\n"
+            ")\n\n"
+            "# Repartition using an appropriate business or "
+            "join key.\n"
+            "optimized_df = df.repartition('device_id')"
+        ),
+    },
+    {
+        "patterns": [
+            "timeoutexception",
+            "timed out",
+            "timeout",
+        ],
+        "root_cause": (
+            "The operation exceeded its configured time "
+            "limit. The cause may be a slow source, network "
+            "latency, an under-provisioned cluster, a stalled "
+            "task, or an unexpectedly large broadcast."
+        ),
+        "confidence": "low",
+        "fix_hint": (
+            "# Increase this only after confirming that a "
+            "broadcast timeout is the cause.\n"
+            "spark.conf.set(\n"
+            "    'spark.sql.broadcastTimeout',\n"
+            "    '600',\n"
+            ")"
+        ),
+    },
+    {
+        "patterns": [
+            "streamingqueryexception",
+            "checkpoint",
+        ],
+        "root_cause": (
+            "The Structured Streaming query failed because "
+            "of an underlying processing, schema, source, "
+            "sink, or checkpoint issue. The nested exception "
+            "and checkpoint compatibility require review."
+        ),
+        "confidence": "medium",
+        "fix_hint": (
+            "# Preserve a stable, unique checkpoint path for "
+            "this stream.\n"
+            "query = (\n"
+            "    streaming_df\n"
+            "    .writeStream\n"
+            "    .format('delta')\n"
+            "    .option(\n"
+            "        'checkpointLocation',\n"
+            "        checkpoint_path,\n"
+            "    )\n"
+            "    .start(target_path)\n"
+            ")"
+        ),
+    },
 ]
 
+
+# ============================================================
+# Structured diagnosis result
+# ============================================================
 
 @dataclass
 class Diagnosis:
@@ -135,326 +334,1376 @@ class Diagnosis:
     source: str
     similar_incidents: list
     tools_used: list
+    business_impact: str = ""
+    validation: str = ""
 
 
-# ─────────────────────────────────────────────
+# ============================================================
 # Tool execution
-# ─────────────────────────────────────────────
-def _run_tool(tool_name: str, tool_input: dict) -> str:
+# ============================================================
+
+def _run_tool(
+    tool_name: str,
+    tool_input: dict,
+) -> str:
+    """
+    Execute deterministic local agent tools.
+    """
+
     if tool_name == "search_past_incidents":
-        results: List[MemoryResult] = retrieve_similar(tool_input["query"], k=3)
-        if not results:
-            return "No similar past incidents found in memory."
-        lines = [f"Found {len(results)} similar past incident(s):\n"]
-        for i, r in enumerate(results, 1):
-            lines.append(
-                f"Incident {i} (similarity: {r.similarity_score:.2f}, source: {r.source}):\n"
-                f"  Error pattern: {r.incident.error_message}\n"
-                f"  Root cause: {r.incident.root_cause}\n"
-                f"  Fix applied: {r.incident.fix_applied}\n"
+        query = str(
+            tool_input.get(
+                "query",
+                "",
             )
-        return "\n".join(lines)
+        )
+
+        results: List[MemoryResult] = (
+            retrieve_similar(
+                query,
+                k=3,
+            )
+        )
+
+        if not results:
+            return (
+                "No similar resolved incidents were found "
+                "in RAG memory."
+            )
+
+        lines = [
+            (
+                f"Found {len(results)} similar resolved "
+                "incident(s)."
+            )
+        ]
+
+        for index, result in enumerate(
+            results,
+            start=1,
+        ):
+            lines.append(
+                (
+                    f"\nIncident {index}\n"
+                    f"Similarity: "
+                    f"{result.similarity_score:.2f}\n"
+                    f"Backend: {result.source}\n"
+                    f"Error: "
+                    f"{result.incident.error_message}\n"
+                    f"Root cause: "
+                    f"{result.incident.root_cause}\n"
+                    f"Applied fix: "
+                    f"{result.incident.fix_applied}"
+                )
+            )
+
+        return "\n".join(
+            lines
+        )
 
     if tool_name == "explain_error":
-        cls = tool_input.get("exception_class", "")
-        for key, explanation in ERROR_EXPLANATIONS.items():
-            if key.lower() in cls.lower():
-                return f"{key}: {explanation}"
-        return f"No explanation found for '{cls}'. Check Spark/Delta documentation."
+        exception_class = str(
+            tool_input.get(
+                "exception_class",
+                "",
+            )
+        )
+
+        for name, explanation in (
+            ERROR_EXPLANATIONS.items()
+        ):
+            if (
+                name.lower()
+                in exception_class.lower()
+            ):
+                return (
+                    f"{name}: {explanation}"
+                )
+
+        return (
+            "No built-in explanation was found for "
+            f"'{exception_class}'. Inspect the nested Spark "
+            "or JVM exception for the underlying cause."
+        )
 
     if tool_name == "suggest_optimization":
-        code = tool_input.get("code", "")
+        code = str(
+            tool_input.get(
+                "code",
+                "",
+            )
+        )
+
+        code_lower = (
+            code.lower()
+        )
+
         suggestions = []
-        if "join" in code.lower() and "broadcast" not in code.lower():
-            suggestions.append("Consider broadcast join if one side of the join is small: from pyspark.sql.functions import broadcast")
-        if ".collect()" in code:
-            suggestions.append("Avoid .collect() on large DataFrames — it pulls all data to the driver. Use .show(), .take(), or write to Delta instead.")
-        if "groupBy" in code or "groupby" in code:
-            suggestions.append("After groupBy/agg, set spark.conf.set('spark.sql.shuffle.partitions', '50') for mid-size data to avoid 200 tiny tasks.")
-        if "write" in code and "partitionBy" not in code:
-            suggestions.append("Add .partitionBy('date') or another high-cardinality column before .save() to enable partition pruning on reads.")
+
+        if (
+            "join" in code_lower
+            and "broadcast" not in code_lower
+        ):
+            suggestions.append(
+                "Consider a broadcast join only when one "
+                "side is verified to be small."
+            )
+
+        if ".collect()" in code_lower:
+            suggestions.append(
+                "Avoid collect() for large DataFrames "
+                "because it transfers all records to the "
+                "driver."
+            )
+
+        if (
+            "groupby" in code_lower
+            or "groupby(" in code_lower
+        ):
+            suggestions.append(
+                "Inspect shuffle partition sizes and data "
+                "skew after aggregation."
+            )
+
+        if (
+            ".write" in code_lower
+            and "partitionby" not in code_lower
+        ):
+            suggestions.append(
+                "Evaluate target partitioning using common "
+                "filter columns with controlled cardinality."
+            )
+
+        if (
+            ".cache()" in code_lower
+            or ".persist(" in code_lower
+        ):
+            suggestions.append(
+                "Cache only reused DataFrames and unpersist "
+                "them after their final action."
+            )
+
         if not suggestions:
-            suggestions.append("No obvious performance issues found. Ensure Z-Ordering on frequently filtered columns: OPTIMIZE table ZORDER BY (device_id)")
-        return "\n".join(f"• {s}" for s in suggestions)
+            suggestions.append(
+                "No obvious code-level optimization issue "
+                "was detected. Inspect the physical plan, "
+                "shuffle size, partition distribution, file "
+                "sizes, and data skew."
+            )
 
-    return f"Unknown tool: {tool_name}"
+        return "\n".join(
+            f"- {suggestion}"
+            for suggestion
+            in suggestions
+        )
+
+    return (
+        f"Unknown agent tool: "
+        f"{tool_name}"
+    )
 
 
-# ─────────────────────────────────────────────
-# Context gathering
-# ─────────────────────────────────────────────
-def _gather_context(run: dict, pipeline: dict, step_id: str) -> dict:
-    step = next(s for s in pipeline["steps"] if s["id"] == step_id)
-    step_run = next(sr for sr in run["step_runs"] if sr["step_id"] == step_id)
-    logs = [l for l in store.load_logs(run["id"]) if l["step_id"] == step_id]
+# ============================================================
+# Safe context gathering
+# ============================================================
+
+def _gather_context(
+    run: dict,
+    pipeline: dict,
+    step_id: str,
+) -> dict:
+    """
+    Gather failed-step evidence without assuming that every
+    field exists.
+    """
+
+    pipeline_steps = (
+        pipeline.get(
+            "steps",
+            [],
+        )
+        if isinstance(
+            pipeline,
+            dict,
+        )
+        else []
+    )
+
+    run_steps = (
+        run.get(
+            "step_runs",
+            [],
+        )
+        if isinstance(
+            run,
+            dict,
+        )
+        else []
+    )
+
+    step = next(
+        (
+            candidate
+            for candidate
+            in pipeline_steps
+            if isinstance(
+                candidate,
+                dict,
+            )
+            and candidate.get(
+                "id"
+            )
+            == step_id
+        ),
+        {},
+    )
+
+    step_run = next(
+        (
+            candidate
+            for candidate
+            in run_steps
+            if isinstance(
+                candidate,
+                dict,
+            )
+            and candidate.get(
+                "step_id"
+            )
+            == step_id
+        ),
+        {},
+    )
+
+    run_id = (
+        run.get(
+            "id",
+            "",
+        )
+        if isinstance(
+            run,
+            dict,
+        )
+        else ""
+    )
+
+    logs = []
+
+    try:
+        logs = (
+            store.load_logs(
+                run_id
+            )
+            if run_id
+            else []
+        )
+
+    except Exception:
+        logs = []
+
+    matching_logs = []
+
+    for log in logs:
+        if not isinstance(
+            log,
+            dict,
+        ):
+            continue
+
+        log_step_id = (
+            log.get(
+                "step_id"
+            )
+        )
+
+        if (
+            log_step_id
+            and log_step_id
+            != step_id
+        ):
+            continue
+
+        message = (
+            log.get(
+                "message"
+            )
+            or log.get(
+                "log_message"
+            )
+            or log.get(
+                "error"
+            )
+        )
+
+        if message:
+            matching_logs.append(
+                str(
+                    message
+                )
+            )
+
     return {
-        "step_name": step["name"],
-        "code": step["code"],
-        "engine": step["engine"],
-        "error_message": step_run.get("error_message") or "",
-        "recent_logs": [l["message"] for l in logs[-10:]],
-        "retry_count": step_run.get("retry_count", 0),
+        "pipeline_name": (
+            pipeline.get(
+                "name",
+                "Unknown pipeline",
+            )
+            if isinstance(
+                pipeline,
+                dict,
+            )
+            else "Unknown pipeline"
+        ),
+        "step_id": step_id,
+        "step_name": (
+            step.get(
+                "name"
+            )
+            or step.get(
+                "step_name"
+            )
+            or step_id
+        ),
+        "code": str(
+            step.get(
+                "code",
+                "",
+            )
+        ),
+        "engine": str(
+            step.get(
+                "engine",
+                "Unknown",
+            )
+        ),
+        "error_message": str(
+            step_run.get(
+                "error_message"
+            )
+            or step_run.get(
+                "error"
+            )
+            or ""
+        ),
+        "recent_logs": (
+            matching_logs[-10:]
+        ),
+        "retry_count": (
+            step_run.get(
+                "retry_count",
+                0,
+            )
+        ),
+        "run_status": (
+            run.get(
+                "status",
+                "UNKNOWN",
+            )
+            if isinstance(
+                run,
+                dict,
+            )
+            else "UNKNOWN"
+        ),
     }
 
 
-# ─────────────────────────────────────────────
-# Rule-based fallback
-# ─────────────────────────────────────────────
-def _rule_based_diagnosis(context: dict, similar: list) -> Diagnosis:
-    error = context["error_message"]
-    for rule in RULE_BASED_DIAGNOSES:
-        if rule["match"].lower() in error.lower():
-            return Diagnosis(
-                root_cause=rule["root_cause"],
-                confidence=rule["confidence"],
-                fixed_code=context["code"].rstrip() + "\n\n# --- agent-suggested fix ---\n" + rule["fix_hint"],
-                source="rule-based",
-                similar_incidents=similar,
-                tools_used=["search_past_incidents"],
+# ============================================================
+# RAG formatting
+# ============================================================
+
+def _retrieve_incident_memory(
+    context: dict,
+    k: int = 3,
+) -> List[MemoryResult]:
+    """
+    Retrieve similar incidents using error and code context.
+    """
+
+    query = (
+        f"{context.get('error_message', '')}\n"
+        f"{context.get('step_name', '')}\n"
+        f"{context.get('engine', '')}\n"
+        f"{context.get('code', '')[:500]}"
+    )
+
+    try:
+        return retrieve_similar(
+            query,
+            k=k,
+        )
+
+    except Exception:
+        return []
+
+
+def _format_incident_memory(
+    similar: List[MemoryResult],
+) -> str:
+    """
+    Convert retrieved incidents into grounded LLM context.
+    """
+
+    if not similar:
+        return (
+            "No similar resolved incidents were retrieved."
+        )
+
+    parts = []
+
+    for index, result in enumerate(
+        similar,
+        start=1,
+    ):
+        parts.append(
+            (
+                f"Resolved incident {index}\n"
+                f"Similarity: "
+                f"{result.similarity_score:.2f}\n"
+                f"Error: "
+                f"{result.incident.error_message}\n"
+                f"Root cause: "
+                f"{result.incident.root_cause}\n"
+                f"Applied fix: "
+                f"{result.incident.fix_applied}\n"
+                f"Confidence: "
+                f"{result.incident.confidence}"
             )
-    return Diagnosis(
-        root_cause=f"No known pattern matched: '{error}'. Manual investigation needed.",
-        confidence="low",
-        fixed_code=context["code"],
-        source="rule-based",
-        similar_incidents=similar,
-        tools_used=[],
+        )
+
+    return "\n\n".join(
+        parts
     )
 
 
-# ─────────────────────────────────────────────
-# LLM agentic loop with tool calling + streaming
-# ─────────────────────────────────────────────
-def _parse_diagnosis(text: str, original_code: str, similar: list, tools_used: list) -> Diagnosis:
-    root_cause_match = re.search(r"ROOT_CAUSE:\s*(.+)", text)
-    confidence_match = re.search(r"CONFIDENCE:\s*(\w+)", text)
-    code_match = re.search(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+# ============================================================
+# Rule-based fallback
+# ============================================================
+
+def _rule_based_diagnosis(
+    context: dict,
+    similar: list,
+) -> Diagnosis:
+    """
+    Produce deterministic guidance when Ollama is unavailable.
+    """
+
+    error = str(
+        context.get(
+            "error_message",
+            "",
+        )
+    )
+
+    code = str(
+        context.get(
+            "code",
+            "",
+        )
+    )
+
+    error_lower = (
+        error.lower()
+    )
+
+    for rule in (
+        RULE_BASED_DIAGNOSES
+    ):
+        if any(
+            pattern.lower()
+            in error_lower
+            for pattern
+            in rule[
+                "patterns"
+            ]
+        ):
+            fixed_code = (
+                code.rstrip()
+                + "\n\n"
+                + "# DataDoctor AI suggested remediation\n"
+                + rule[
+                    "fix_hint"
+                ]
+            )
+
+            return Diagnosis(
+                root_cause=(
+                    rule[
+                        "root_cause"
+                    ]
+                ),
+                confidence=(
+                    rule[
+                        "confidence"
+                    ]
+                ),
+                fixed_code=(
+                    fixed_code
+                ),
+                source=(
+                    "rule-based-local"
+                ),
+                similar_incidents=(
+                    similar
+                ),
+                tools_used=[
+                    "search_past_incidents"
+                ],
+                business_impact=(
+                    "The failed step may delay downstream "
+                    "datasets, reporting, analytics, and "
+                    "pipeline SLA completion."
+                ),
+                validation=(
+                    "Run the corrected step using controlled "
+                    "test data, verify schema and row counts, "
+                    "review logs, and confirm that rerunning "
+                    "does not create duplicates."
+                ),
+            )
+
+    if similar:
+        best_match = (
+            similar[0]
+        )
+
+        if (
+            best_match.similarity_score
+            >= 0.65
+        ):
+            return Diagnosis(
+                root_cause=(
+                    best_match
+                    .incident
+                    .root_cause
+                ),
+                confidence=(
+                    best_match
+                    .incident
+                    .confidence
+                    or "medium"
+                ),
+                fixed_code=(
+                    best_match
+                    .incident
+                    .fix_applied
+                    or code
+                ),
+                source=(
+                    "rag-memory-fallback"
+                ),
+                similar_incidents=(
+                    similar
+                ),
+                tools_used=[
+                    "search_past_incidents"
+                ],
+                business_impact=(
+                    "The failure may delay downstream data "
+                    "availability and increase recovery effort."
+                ),
+                validation=(
+                    "Validate the retrieved fix against the "
+                    "current schema, code version, and target "
+                    "environment before applying it."
+                ),
+            )
+
     return Diagnosis(
-        root_cause=root_cause_match.group(1).strip() if root_cause_match else "See full response.",
-        confidence=confidence_match.group(1).strip().lower() if confidence_match else "low",
-        fixed_code=code_match.group(1).strip() if code_match else original_code,
-        source="claude-api",
+        root_cause=(
+            "No sufficiently reliable known pattern matched "
+            f"the current error: '{error}'. Review the full "
+            "exception chain, schema, input data, recent "
+            "changes, and Spark execution logs."
+        ),
+        confidence="low",
+        fixed_code=code,
+        source="rule-based-local",
+        similar_incidents=similar,
+        tools_used=[
+            "search_past_incidents"
+        ],
+        business_impact=(
+            "The unresolved failure may affect downstream "
+            "data freshness and operational SLA completion."
+        ),
+        validation=(
+            "Reproduce the failure with the same inputs, "
+            "inspect the complete stack trace, validate the "
+            "schema, and test any change before approval."
+        ),
+    )
+
+
+# ============================================================
+# Ollama prompt
+# ============================================================
+
+def _build_agent_question(
+    context: dict,
+    similar: list,
+) -> str:
+    """
+    Build a complete evidence-grounded agent request.
+    """
+
+    recent_logs = (
+        "\n".join(
+            context.get(
+                "recent_logs",
+                [],
+            )
+        )
+        or "No recent logs were recorded."
+    )
+
+    incident_memory = (
+        _format_incident_memory(
+            similar
+        )
+    )
+
+    return (
+        f"{AGENT_SYSTEM_PROMPT}\n\n"
+        f"PIPELINE\n"
+        f"Name: "
+        f"{context.get('pipeline_name')}\n"
+        f"Run status: "
+        f"{context.get('run_status')}\n\n"
+        f"FAILED STEP\n"
+        f"ID: "
+        f"{context.get('step_id')}\n"
+        f"Name: "
+        f"{context.get('step_name')}\n"
+        f"Engine: "
+        f"{context.get('engine')}\n"
+        f"Retry count: "
+        f"{context.get('retry_count')}\n\n"
+        f"ERROR\n"
+        f"{context.get('error_message')}\n\n"
+        f"CURRENT CODE\n"
+        f"{context.get('code')}\n\n"
+        f"RECENT LOGS\n"
+        f"{recent_logs}\n\n"
+        f"RAG INCIDENT MEMORY\n"
+        f"{incident_memory}\n\n"
+        f"Perform an evidence-based diagnosis. Preserve the "
+        f"original business logic unless a change is required "
+        f"to resolve the demonstrated failure."
+    )
+
+
+# ============================================================
+# LLM response parsing
+# ============================================================
+
+def _extract_section(
+    text: str,
+    section_name: str,
+    next_sections: List[str],
+) -> str:
+    """
+    Extract a named response section.
+    """
+
+    next_pattern = (
+        "|".join(
+            re.escape(
+                section
+            )
+            for section
+            in next_sections
+        )
+    )
+
+    if next_pattern:
+        pattern = (
+            rf"{re.escape(section_name)}\s*:\s*"
+            rf"(.*?)"
+            rf"(?=\n(?:{next_pattern})\s*:|\Z)"
+        )
+
+    else:
+        pattern = (
+            rf"{re.escape(section_name)}\s*:\s*"
+            rf"(.*)"
+        )
+
+    match = re.search(
+        pattern,
+        text,
+        re.IGNORECASE
+        | re.DOTALL,
+    )
+
+    return (
+        match.group(1).strip()
+        if match
+        else ""
+    )
+
+
+def _clean_code(
+    code: str,
+) -> str:
+    """
+    Remove optional Markdown code fences.
+    """
+
+    cleaned = (
+        code.strip()
+    )
+
+    cleaned = re.sub(
+        r"^```[a-zA-Z0-9_+-]*\s*",
+        "",
+        cleaned,
+    )
+
+    cleaned = re.sub(
+        r"\s*```$",
+        "",
+        cleaned,
+    )
+
+    return (
+        cleaned.strip()
+    )
+
+
+def _parse_diagnosis(
+    text: str,
+    original_code: str,
+    similar: list,
+    tools_used: list,
+    source: str,
+) -> Diagnosis:
+    """
+    Parse the structured Ollama response safely.
+    """
+
+    root_cause = _extract_section(
+        text,
+        "ROOT_CAUSE",
+        [
+            "CONFIDENCE",
+            "FIXED_CODE",
+            "BUSINESS_IMPACT",
+            "VALIDATION",
+        ],
+    )
+
+    confidence = _extract_section(
+        text,
+        "CONFIDENCE",
+        [
+            "FIXED_CODE",
+            "BUSINESS_IMPACT",
+            "VALIDATION",
+        ],
+    )
+
+    fixed_code = _extract_section(
+        text,
+        "FIXED_CODE",
+        [
+            "BUSINESS_IMPACT",
+            "VALIDATION",
+        ],
+    )
+
+    business_impact = (
+        _extract_section(
+            text,
+            "BUSINESS_IMPACT",
+            [
+                "VALIDATION",
+            ],
+        )
+    )
+
+    validation = _extract_section(
+        text,
+        "VALIDATION",
+        [],
+    )
+
+    normalized_confidence = (
+        confidence
+        .strip()
+        .lower()
+    )
+
+    if normalized_confidence not in {
+        "low",
+        "medium",
+        "high",
+    }:
+        normalized_confidence = (
+            "low"
+        )
+
+    return Diagnosis(
+        root_cause=(
+            root_cause
+            or "Review the complete model response."
+        ),
+        confidence=(
+            normalized_confidence
+        ),
+        fixed_code=(
+            _clean_code(
+                fixed_code
+            )
+            or original_code
+        ),
+        source=source,
         similar_incidents=similar,
         tools_used=tools_used,
+        business_impact=(
+            business_impact
+        ),
+        validation=validation,
     )
 
 
-def diagnose(run: dict, pipeline: dict, step_id: str) -> Diagnosis:
-    """
-    Full agentic diagnosis: RAG retrieval → tool-augmented LLM reasoning → structured output.
-    Non-streaming version (for compatibility). See diagnose_stream() for streaming.
-    """
-    context = _gather_context(run, pipeline, step_id)
+# ============================================================
+# Main diagnosis API
+# ============================================================
 
-    # Always retrieve similar incidents first (RAG step — happens even without API key)
-    similar = retrieve_similar(
-        f"{context['error_message']} {context['code'][:200]}", k=3
+def diagnose(
+    run: dict,
+    pipeline: dict,
+    step_id: str,
+) -> Diagnosis:
+    """
+    Run the complete agent workflow:
+
+    1. Gather pipeline evidence.
+    2. Retrieve similar resolved incidents.
+    3. Ask free local Ollama for grounded reasoning.
+    4. Fall back safely when Ollama is unavailable.
+    """
+
+    context = _gather_context(
+        run,
+        pipeline,
+        step_id,
     )
 
-    api_key = _get_api_key()
-    if not api_key:
-        return _rule_based_diagnosis(context, similar)
+    similar = (
+        _retrieve_incident_memory(
+            context,
+            k=3,
+        )
+    )
 
-    # Build initial user message with full context
-    similar_text = ""
-    if similar:
-        parts = []
-        for r in similar:
-            parts.append(
-                f"  Past incident (similarity {r.similarity_score:.2f}):\n"
-                f"    Error: {r.incident.error_message}\n"
-                f"    Root cause: {r.incident.root_cause}\n"
-                f"    Fix: {r.incident.fix_applied}"
+    question = (
+        _build_agent_question(
+            context,
+            similar,
+        )
+    )
+
+    result = (
+        ask_data_doctor(
+            question=question,
+            dataset_context={
+                "pipeline_name": (
+                    context[
+                        "pipeline_name"
+                    ]
+                ),
+                "step_name": (
+                    context[
+                        "step_name"
+                    ]
+                ),
+                "engine": (
+                    context[
+                        "engine"
+                    ]
+                ),
+                "retry_count": (
+                    context[
+                        "retry_count"
+                    ]
+                ),
+                "run_status": (
+                    context[
+                        "run_status"
+                    ]
+                ),
+            },
+            rag_context=(
+                _format_incident_memory(
+                    similar
+                )
+            ),
+            business_context={
+                "required_outcome": (
+                    "Restore pipeline execution while "
+                    "preserving data correctness, "
+                    "idempotency, and downstream SLA."
+                )
+            },
+            analysis_context={
+                "error_message": (
+                    context[
+                        "error_message"
+                    ]
+                ),
+                "recent_logs": (
+                    context[
+                        "recent_logs"
+                    ]
+                ),
+                "current_code": (
+                    context[
+                        "code"
+                    ]
+                ),
+            },
+            source_names=[
+                "Pipeline definition",
+                "Run history",
+                "Execution logs",
+                "Incident RAG memory",
+            ],
+            model=(
+                DEFAULT_OLLAMA_MODEL
+            ),
+            base_url=(
+                DEFAULT_OLLAMA_URL
+            ),
+            temperature=0.1,
+        )
+    )
+
+    if not result.get(
+        "success"
+    ):
+        return (
+            _rule_based_diagnosis(
+                context,
+                similar,
             )
-        similar_text = "\nRAG MEMORY — similar past incidents:\n" + "\n".join(parts) + "\n"
+        )
 
-    user_message = (
-        f"Pipeline: {pipeline.get('name', 'unknown')}\n"
-        f"Step: {context['step_name']} ({context['engine']})\n"
-        f"Error: {context['error_message']}\n"
-        f"Retry count: {context['retry_count']}\n"
-        f"{similar_text}\n"
-        f"Code:\n{context['code']}\n\n"
-        f"Recent logs:\n" + "\n".join(context["recent_logs"])
+    answer = str(
+        result.get(
+            "answer",
+            "",
+        )
     )
 
-    messages = [{"role": "user", "content": user_message}]
-    tools_used = []
-
-    # Agentic tool-calling loop: run until the model produces a final text response
-    for _ in range(5):  # safety cap on tool rounds
-        try:
-            resp = requests.post(
-                ANTHROPIC_API_URL,
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": MODEL,
-                    "max_tokens": 1200,
-                    "system": AGENT_SYSTEM_PROMPT,
-                    "tools": TOOLS,
-                    "messages": messages,
-                },
-                timeout=30,
+    if not answer.strip():
+        return (
+            _rule_based_diagnosis(
+                context,
+                similar,
             )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception:
-            return _rule_based_diagnosis(context, similar)
+        )
 
-        stop_reason = data.get("stop_reason")
-        content = data.get("content", [])
+    diagnosis = (
+        _parse_diagnosis(
+            text=answer,
+            original_code=(
+                context[
+                    "code"
+                ]
+            ),
+            similar=similar,
+            tools_used=[
+                "search_past_incidents",
+                "ollama_reasoning",
+            ],
+            source=(
+                "ollama-local-rag"
+            ),
+        )
+    )
 
-        if stop_reason == "end_turn":
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            return _parse_diagnosis(text, context["code"], similar, tools_used)
+    if (
+        not diagnosis.root_cause
+        or diagnosis.root_cause
+        == (
+            "Review the complete model response."
+        )
+    ):
+        return (
+            _rule_based_diagnosis(
+                context,
+                similar,
+            )
+        )
 
-        if stop_reason == "tool_use":
-            # Execute every tool the model requested
-            tool_results = []
-            messages.append({"role": "assistant", "content": content})
-            for block in content:
-                if block.get("type") != "tool_use":
-                    continue
-                tool_name = block["name"]
-                tool_input = block.get("input", {})
-                tools_used.append(tool_name)
-                result = _run_tool(tool_name, tool_input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": result,
-                })
-            messages.append({"role": "user", "content": tool_results})
-            continue
-
-        break
-
-    return _rule_based_diagnosis(context, similar)
+    return diagnosis
 
 
-def diagnose_stream(run: dict, pipeline: dict, step_id: str) -> Generator[str, None, Diagnosis]:
+# ============================================================
+# Streaming-compatible diagnosis API
+# ============================================================
+
+def diagnose_stream(
+    run: dict,
+    pipeline: dict,
+    step_id: str,
+) -> Generator[Any, None, None]:
     """
-    Streaming version: yields token strings as they arrive so the UI can display
-    them progressively. Yields a sentinel dict as the last item containing the
-    full Diagnosis object once the stream is complete.
+    Compatibility generator for the existing Streamlit UI.
 
-    Usage in Streamlit:
-        for chunk in diagnose_stream(run, pipeline, step_id):
-            if isinstance(chunk, dict):  # final sentinel
+    The current Ollama assistant returns a completed grounded
+    response. This function emits readable chunks and then a
+    final diagnosis sentinel.
+
+    Existing usage remains:
+
+        for chunk in diagnose_stream(...):
+            if isinstance(chunk, dict):
                 diagnosis = chunk["diagnosis"]
             else:
                 display_token(chunk)
     """
-    context = _gather_context(run, pipeline, step_id)
-    similar = retrieve_similar(f"{context['error_message']} {context['code'][:200]}", k=3)
-    api_key = _get_api_key()
 
-    if not api_key:
-        diagnosis = _rule_based_diagnosis(context, similar)
-        yield diagnosis.root_cause
-        yield {"diagnosis": diagnosis}
-        return
+    diagnosis = diagnose(
+        run,
+        pipeline,
+        step_id,
+    )
 
-    similar_text = ""
-    if similar:
-        parts = [
-            f"  Past incident (similarity {r.similarity_score:.2f}):\n"
-            f"    Error: {r.incident.error_message}\n    Fix: {r.incident.fix_applied}"
-            for r in similar
+    summary_parts = [
+        (
+            "ROOT_CAUSE: "
+            f"{diagnosis.root_cause}"
+        ),
+        (
+            "CONFIDENCE: "
+            f"{diagnosis.confidence}"
+        ),
+    ]
+
+    if diagnosis.business_impact:
+        summary_parts.append(
+            (
+                "BUSINESS_IMPACT: "
+                f"{diagnosis.business_impact}"
+            )
+        )
+
+    if diagnosis.validation:
+        summary_parts.append(
+            (
+                "VALIDATION: "
+                f"{diagnosis.validation}"
+            )
+        )
+
+    summary = (
+        "\n\n".join(
+            summary_parts
+        )
+    )
+
+    chunk_size = 120
+
+    for start in range(
+        0,
+        len(summary),
+        chunk_size,
+    ):
+        yield summary[
+            start:
+            start + chunk_size
         ]
-        similar_text = "\nRAG MEMORY:\n" + "\n".join(parts) + "\n"
 
-    user_message = (
-        f"Step: {context['step_name']} ({context['engine']})\n"
-        f"Error: {context['error_message']}\n"
-        f"{similar_text}\nCode:\n{context['code']}\n\n"
-        f"Logs:\n" + "\n".join(context["recent_logs"])
+    yield {
+        "diagnosis": diagnosis
+    }
+
+
+# ============================================================
+# Apply approved fix
+# ============================================================
+
+def apply_fix(
+    pipeline: dict,
+    step_id: str,
+    fixed_code: str,
+) -> dict:
+    """
+    Patch the selected pipeline step and persist it.
+
+    The fix is applied only when the UI explicitly calls this
+    function after user approval.
+    """
+
+    if not isinstance(
+        pipeline,
+        dict,
+    ):
+        raise TypeError(
+            "pipeline must be a dictionary."
+        )
+
+    steps = pipeline.get(
+        "steps",
+        [],
+    )
+
+    if not isinstance(
+        steps,
+        list,
+    ):
+        raise ValueError(
+            "Pipeline steps must be a list."
+        )
+
+    updated = False
+
+    for step in steps:
+        if (
+            isinstance(
+                step,
+                dict,
+            )
+            and step.get(
+                "id"
+            )
+            == step_id
+        ):
+            step[
+                "code"
+            ] = fixed_code
+
+            step[
+                "updated_at"
+            ] = (
+                datetime.now(
+                    timezone.utc
+                )
+                .isoformat()
+            )
+
+            updated = True
+
+            break
+
+    if not updated:
+        raise ValueError(
+            f"Pipeline step '{step_id}' was not found."
+        )
+
+    pipeline[
+        "updated_at"
+    ] = (
+        datetime.now(
+            timezone.utc
+        )
+        .isoformat()
+    )
+
+    store.save_pipeline(
+        pipeline
     )
 
     try:
-        resp = requests.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+        store.append_audit_event(
+            event_type=(
+                "pipeline_fix"
+            ),
+            action=(
+                "apply_agent_fix"
+            ),
+            status="success",
+            details={
+                "step_id": (
+                    step_id
+                ),
+                "pipeline_name": (
+                    pipeline.get(
+                        "name",
+                        "",
+                    )
+                ),
             },
-            json={
-                "model": MODEL,
-                "max_tokens": 1200,
-                "system": AGENT_SYSTEM_PROMPT,
-                "tools": TOOLS,
-                "stream": True,
-                "messages": [{"role": "user", "content": user_message}],
-            },
-            timeout=60,
-            stream=True,
+            actor=(
+                "DataDoctor AI"
+            ),
+            resource_id=(
+                pipeline.get(
+                    "id"
+                )
+            ),
         )
-        resp.raise_for_status()
+
     except Exception:
-        diagnosis = _rule_based_diagnosis(context, similar)
-        yield diagnosis.root_cause
-        yield {"diagnosis": diagnosis}
-        return
+        pass
 
-    full_text = ""
-    for raw_line in resp.iter_lines():
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
-        if not line.startswith("data: "):
-            continue
-        payload = line[6:]
-        if payload.strip() == "[DONE]":
-            break
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "content_block_delta":
-            delta = event.get("delta", {})
-            if delta.get("type") == "text_delta":
-                token = delta.get("text", "")
-                full_text += token
-                yield token
-
-    diagnosis = _parse_diagnosis(full_text, context["code"], similar, ["streaming"])
-    yield {"diagnosis": diagnosis}
-
-
-# ─────────────────────────────────────────────
-# ACT: apply fix + store to RAG memory
-# ─────────────────────────────────────────────
-def apply_fix(pipeline: dict, step_id: str, fixed_code: str) -> dict:
-    """Patch the step's code in the pipeline definition."""
-    for step in pipeline["steps"]:
-        if step["id"] == step_id:
-            step["code"] = fixed_code
-    store.save_pipeline(pipeline)
     return pipeline
 
 
+# ============================================================
+# Store resolved incident in RAG memory
+# ============================================================
+
 def record_resolved_incident(
-    run: dict, pipeline: dict, step_id: str, diagnosis: Diagnosis
-):
+    run: dict,
+    pipeline: dict,
+    step_id: str,
+    diagnosis: Diagnosis,
+) -> Incident:
     """
-    Store a resolved incident to the RAG memory so future agent calls can
-    retrieve it as context. This is what makes the system learn over time.
+    Store an approved resolved incident in RAG memory.
+
+    Future diagnoses can retrieve this incident and reuse its
+    root cause and remediation as grounded context.
     """
-    step = next((s for s in pipeline["steps"] if s["id"] == step_id), {})
-    step_run = next((sr for sr in run["step_runs"] if sr["step_id"] == step_id), {})
-    incident = Incident(
-        id=f"inc-{step_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-        error_message=step_run.get("error_message") or "",
-        step_code=step.get("code", "")[:500],
-        root_cause=diagnosis.root_cause,
-        fix_applied=diagnosis.fixed_code[:500],
-        pipeline_name=pipeline.get("name", ""),
-        resolved_at=datetime.now(timezone.utc).isoformat(),
-        confidence=diagnosis.confidence,
+
+    pipeline_steps = (
+        pipeline.get(
+            "steps",
+            [],
+        )
+        if isinstance(
+            pipeline,
+            dict,
+        )
+        else []
     )
-    store_incident(incident)
+
+    run_steps = (
+        run.get(
+            "step_runs",
+            [],
+        )
+        if isinstance(
+            run,
+            dict,
+        )
+        else []
+    )
+
+    step = next(
+        (
+            candidate
+            for candidate
+            in pipeline_steps
+            if isinstance(
+                candidate,
+                dict,
+            )
+            and candidate.get(
+                "id"
+            )
+            == step_id
+        ),
+        {},
+    )
+
+    step_run = next(
+        (
+            candidate
+            for candidate
+            in run_steps
+            if isinstance(
+                candidate,
+                dict,
+            )
+            and candidate.get(
+                "step_id"
+            )
+            == step_id
+        ),
+        {},
+    )
+
+    now = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    incident = Incident(
+        id=(
+            f"inc-{step_id}-"
+            f"{now.strftime('%Y%m%d%H%M%S%f')}"
+        ),
+        error_message=str(
+            step_run.get(
+                "error_message"
+            )
+            or step_run.get(
+                "error"
+            )
+            or ""
+        ),
+        step_code=str(
+            step.get(
+                "code",
+                "",
+            )
+        )[:2000],
+        root_cause=(
+            diagnosis.root_cause
+        ),
+        fix_applied=(
+            diagnosis.fixed_code[
+                :4000
+            ]
+        ),
+        pipeline_name=str(
+            pipeline.get(
+                "name",
+                "",
+            )
+        ),
+        resolved_at=(
+            now.isoformat()
+        ),
+        confidence=(
+            diagnosis.confidence
+        ),
+    )
+
+    store_incident(
+        incident
+    )
+
+    try:
+        store.append_audit_event(
+            event_type=(
+                "rag_memory"
+            ),
+            action=(
+                "store_resolved_incident"
+            ),
+            status="success",
+            details={
+                "incident_id": (
+                    incident.id
+                ),
+                "step_id": (
+                    step_id
+                ),
+                "confidence": (
+                    diagnosis.confidence
+                ),
+                "diagnosis_source": (
+                    diagnosis.source
+                ),
+            },
+            actor=(
+                "DataDoctor AI"
+            ),
+            resource_id=(
+                pipeline.get(
+                    "id"
+                )
+            ),
+        )
+
+    except Exception:
+        pass
+
+    return incident
