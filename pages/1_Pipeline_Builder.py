@@ -403,8 +403,6 @@ def numeric_summary(
         }
 
     return output
-
-
 def categorical_summary(
     dataframe: pd.DataFrame,
     max_columns: int = 20,
@@ -497,15 +495,14 @@ def detect_business_metrics(
         "total_cost",
         "cost",
         "cost_amount",
-        "expense",
-        "expenses",
+        "operating_cost",
     ]
 
     profit_candidates = [
         "profit",
         "total_profit",
         "net_profit",
-        "profit_amount",
+        "gross_profit",
     ]
 
     quantity_candidates = [
@@ -515,9 +512,27 @@ def detect_business_metrics(
         "units_sold",
     ]
 
+    region_candidates = [
+        "region",
+        "sales_region",
+        "market",
+        "location",
+    ]
+
+    product_candidates = [
+        "product",
+        "product_name",
+        "item",
+        "item_name",
+    ]
+
+
     def first_existing(
         candidates: List[str],
     ) -> Optional[str]:
+        """
+        Return the first candidate column found.
+        """
 
         for candidate in candidates:
 
@@ -527,41 +542,39 @@ def detect_business_metrics(
 
         return None
 
-    sales_column = (
-        first_existing(
-            sales_candidates
-        )
+
+    sales_column = first_existing(
+        sales_candidates
     )
 
-    cost_column = (
-        first_existing(
-            cost_candidates
-        )
+    cost_column = first_existing(
+        cost_candidates
     )
 
-    profit_column = (
-        first_existing(
-            profit_candidates
-        )
+    profit_column = first_existing(
+        profit_candidates
     )
 
-    quantity_column = (
-        first_existing(
-            quantity_candidates
-        )
+    quantity_column = first_existing(
+        quantity_candidates
     )
+
+    region_column = first_existing(
+        region_candidates
+    )
+
+    product_column = first_existing(
+        product_candidates
+    )
+
 
     if sales_column:
 
-        total_sales = float(
-            pd.to_numeric(
-                dataframe[
-                    sales_column
-                ],
-                errors="coerce",
-            )
-            .fillna(0)
-            .sum()
+        sales_series = pd.to_numeric(
+            dataframe[
+                sales_column
+            ],
+            errors="coerce",
         )
 
         metrics[
@@ -570,19 +583,24 @@ def detect_business_metrics(
 
         metrics[
             "total_sales"
-        ] = total_sales
+        ] = float(
+            sales_series.sum()
+        )
+
+        metrics[
+            "average_sales"
+        ] = float(
+            sales_series.mean()
+        )
+
 
     if cost_column:
 
-        total_cost = float(
-            pd.to_numeric(
-                dataframe[
-                    cost_column
-                ],
-                errors="coerce",
-            )
-            .fillna(0)
-            .sum()
+        cost_series = pd.to_numeric(
+            dataframe[
+                cost_column
+            ],
+            errors="coerce",
         )
 
         metrics[
@@ -591,19 +609,18 @@ def detect_business_metrics(
 
         metrics[
             "total_cost"
-        ] = total_cost
+        ] = float(
+            cost_series.sum()
+        )
+
 
     if profit_column:
 
-        total_profit = float(
-            pd.to_numeric(
-                dataframe[
-                    profit_column
-                ],
-                errors="coerce",
-            )
-            .fillna(0)
-            .sum()
+        profit_series = pd.to_numeric(
+            dataframe[
+                profit_column
+            ],
+            errors="coerce",
         )
 
         metrics[
@@ -612,20 +629,36 @@ def detect_business_metrics(
 
         metrics[
             "total_profit"
-        ] = total_profit
+        ] = float(
+            profit_series.sum()
+        )
+
+        metrics[
+            "average_profit"
+        ] = float(
+            profit_series.mean()
+        )
+
 
     elif (
         sales_column
         and cost_column
     ):
 
-        total_profit = (
-            metrics[
-                "total_sales"
-            ]
-            - metrics[
-                "total_cost"
-            ]
+        calculated_profit = (
+            pd.to_numeric(
+                dataframe[
+                    sales_column
+                ],
+                errors="coerce",
+            )
+            -
+            pd.to_numeric(
+                dataframe[
+                    cost_column
+                ],
+                errors="coerce",
+            )
         )
 
         metrics[
@@ -637,35 +670,24 @@ def detect_business_metrics(
         metrics[
             "total_profit"
         ] = float(
-            total_profit
+            calculated_profit.sum()
         )
-
-    if (
-        "total_profit"
-        in metrics
-        and metrics.get(
-            "total_sales",
-            0,
-        )
-        != 0
-    ):
 
         metrics[
-            "profit_rate_percentage"
-        ] = round(
-            (
-                metrics[
-                    "total_profit"
-                ]
-                / metrics[
-                    "total_sales"
-                ]
-            )
-            * 100,
-            4,
+            "average_profit"
+        ] = float(
+            calculated_profit.mean()
         )
 
+
     if quantity_column:
+
+        quantity_series = pd.to_numeric(
+            dataframe[
+                quantity_column
+            ],
+            errors="coerce",
+        )
 
         metrics[
             "quantity_column"
@@ -674,40 +696,64 @@ def detect_business_metrics(
         metrics[
             "total_quantity"
         ] = float(
-            pd.to_numeric(
-                dataframe[
-                    quantity_column
-                ],
-                errors="coerce",
-            )
-            .fillna(0)
-            .sum()
+            quantity_series.sum()
         )
 
+        metrics[
+            "average_quantity"
+        ] = float(
+            quantity_series.mean()
+        )
+
+
     if (
-        profit_column
-        and "region"
-        in columns
+        "total_sales"
+        in metrics
+        and metrics[
+            "total_sales"
+        ] != 0
+        and "total_profit"
+        in metrics
     ):
 
-        regional_profit = (
+        metrics[
+            "profit_rate_percentage"
+        ] = float(
+            (
+                metrics[
+                    "total_profit"
+                ]
+                /
+                metrics[
+                    "total_sales"
+                ]
+            )
+            * 100
+        )
+
+
+    if (
+        region_column
+        and profit_column
+    ):
+
+        region_profit = (
             dataframe
             .assign(
-                _verified_profit=(
+                __verified_profit=(
                     pd.to_numeric(
                         dataframe[
                             profit_column
                         ],
                         errors="coerce",
                     )
-                    .fillna(0)
                 )
             )
             .groupby(
-                "region",
+                region_column,
                 dropna=False,
             )[
-                "_verified_profit"
+                "__verified_profit"
             ]
             .sum()
             .sort_values(
@@ -715,7 +761,26 @@ def detect_business_metrics(
             )
         )
 
-        if not regional_profit.empty:
+        if not region_profit.empty:
+
+            highest_region = (
+                region_profit.index[
+                    0
+                ]
+            )
+
+            metrics[
+                "highest_profit_region"
+            ] = {
+                "region": str(
+                    highest_region
+                ),
+                "profit": float(
+                    region_profit.iloc[
+                        0
+                    ]
+                ),
+            }
 
             metrics[
                 "profit_by_region"
@@ -726,48 +791,32 @@ def detect_business_metrics(
                     value
                 )
                 for key, value
-                in regional_profit.items()
+                in region_profit.items()
             }
 
-            metrics[
-                "highest_profit_region"
-            ] = {
-                "region": str(
-                    regional_profit.index[
-                        0
-                    ]
-                ),
-                "profit": float(
-                    regional_profit.iloc[
-                        0
-                    ]
-                ),
-            }
 
     if (
-        profit_column
-        and "product"
-        in columns
+        product_column
+        and profit_column
     ):
 
         product_profit = (
             dataframe
             .assign(
-                _verified_profit=(
+                __verified_profit=(
                     pd.to_numeric(
                         dataframe[
                             profit_column
                         ],
                         errors="coerce",
                     )
-                    .fillna(0)
                 )
             )
             .groupby(
-                "product",
+                product_column,
                 dropna=False,
             )[
-                "_verified_profit"
+                "__verified_profit"
             ]
             .sum()
             .sort_values(
@@ -776,6 +825,25 @@ def detect_business_metrics(
         )
 
         if not product_profit.empty:
+
+            highest_product = (
+                product_profit.index[
+                    0
+                ]
+            )
+
+            metrics[
+                "highest_profit_product"
+            ] = {
+                "product": str(
+                    highest_product
+                ),
+                "profit": float(
+                    product_profit.iloc[
+                        0
+                    ]
+                ),
+            }
 
             metrics[
                 "profit_by_product"
@@ -789,31 +857,21 @@ def detect_business_metrics(
                 in product_profit.items()
             }
 
-            metrics[
-                "highest_profit_product"
-            ] = {
-                "product": str(
-                    product_profit.index[
-                        0
-                    ]
-                ),
-                "profit": float(
-                    product_profit.iloc[
-                        0
-                    ]
-                ),
-            }
 
     return metrics
-
-
 def build_profile(
     dataframe: pd.DataFrame,
     file_name: str,
     file_hash: str,
 ) -> Dict[str, Any]:
     """
-    Build a verified enterprise dataset profile.
+    Build a verified dataset profile for:
+
+    - Pipeline generation
+    - Data-quality reporting
+    - Business analysis
+    - Conversational AI grounding
+    - RAG context
     """
 
     row_count = int(
@@ -828,10 +886,9 @@ def build_profile(
         )
     )
 
-    duplicate_rows = int(
-        dataframe
-        .duplicated()
-        .sum()
+    total_cells = (
+        row_count
+        * column_count
     )
 
     null_counts = {
@@ -844,13 +901,9 @@ def build_profile(
             .isna()
             .sum()
         )
-        for column in dataframe.columns
+        for column
+        in dataframe.columns
     }
-
-    total_cells = (
-        row_count
-        * column_count
-    )
 
     missing_cells = int(
         sum(
@@ -858,45 +911,97 @@ def build_profile(
         )
     )
 
-    completeness = (
-        (
-            1
-            - (
-                missing_cells
-                / total_cells
+    duplicate_rows = int(
+        dataframe
+        .duplicated()
+        .sum()
+    )
+
+    completeness_percentage = (
+        round(
+            (
+                1
+                -
+                (
+                    missing_cells
+                    /
+                    total_cells
+                )
             )
+            * 100,
+            2,
         )
-        * 100
         if total_cells
-        else 0.0
+        else 100.0
     )
 
-    uniqueness = (
-        (
-            1
-            - (
-                duplicate_rows
-                / row_count
+    uniqueness_percentage = (
+        round(
+            (
+                1
+                -
+                (
+                    duplicate_rows
+                    /
+                    row_count
+                )
             )
+            * 100,
+            2,
         )
-        * 100
         if row_count
-        else 0.0
+        else 100.0
     )
 
-    quality_score = round(
+    data_quality_score = round(
         (
-            completeness
+            completeness_percentage
             * 0.7
         )
-        + (
-            uniqueness
+        +
+        (
+            uniqueness_percentage
             * 0.3
         ),
         2,
     )
 
-    return {
+    columns = []
+
+    for column in dataframe.columns:
+
+        series = dataframe[
+            column
+        ]
+
+        columns.append(
+            {
+                "name": str(
+                    column
+                ),
+                "dtype": str(
+                    series.dtype
+                ),
+                "nullable": bool(
+                    series
+                    .isna()
+                    .any()
+                ),
+                "missing_values": int(
+                    series
+                    .isna()
+                    .sum()
+                ),
+                "unique_values": int(
+                    series
+                    .nunique(
+                        dropna=True
+                    )
+                ),
+            }
+        )
+
+    profile = {
         "file_name": (
             file_name
         ),
@@ -909,40 +1014,14 @@ def build_profile(
         "column_count": (
             column_count
         ),
-        "columns": [
-            {
-                "name": str(
-                    column
-                ),
-                "data_type": str(
-                    dataframe[
-                        column
-                    ].dtype
-                ),
-                "null_count": (
-                    null_counts[
-                        column
-                    ]
-                ),
-                "non_null_count": int(
-                    dataframe[
-                        column
-                    ]
-                    .notna()
-                    .sum()
-                ),
-                "unique_count": int(
-                    dataframe[
-                        column
-                    ]
-                    .nunique(
-                        dropna=True
-                    )
-                ),
-            }
-            for column
-            in dataframe.columns
-        ],
+        "columns": (
+            columns
+        ),
+        "column_names": (
+            list(
+                dataframe.columns
+            )
+        ),
         "null_counts": (
             null_counts
         ),
@@ -953,19 +1032,13 @@ def build_profile(
             duplicate_rows
         ),
         "completeness_percentage": (
-            round(
-                completeness,
-                2,
-            )
+            completeness_percentage
         ),
         "uniqueness_percentage": (
-            round(
-                uniqueness,
-                2,
-            )
+            uniqueness_percentage
         ),
         "data_quality_score": (
-            quality_score
+            data_quality_score
         ),
         "numeric_summary": (
             numeric_summary(
@@ -977,22 +1050,24 @@ def build_profile(
                 dataframe
             )
         ),
-        "business_metrics": (
-            detect_business_metrics(
-                dataframe
-            )
-        ),
         "sample_rows": (
             dataframe_sample(
                 dataframe,
                 limit=20,
             )
         ),
+        "business_metrics": (
+            detect_business_metrics(
+                dataframe
+            )
+        ),
     }
+
+    return profile
 
 
 # =========================================================
-# AUTOMATIC PIPELINE GENERATION
+# FILE-BASED PIPELINE GENERATION
 # =========================================================
 
 def build_file_pipeline_steps(
@@ -1000,11 +1075,8 @@ def build_file_pipeline_steps(
     profile: Dict[str, Any],
 ) -> List[dict]:
     """
-    Generate a realistic file-processing workflow.
-
-    These steps describe the actual local processing already
-    performed by this page and remain compatible with the
-    existing DataDoctor pipeline engine.
+    Generate a dependency-aware Bronze → Silver → Gold
+    pipeline from the uploaded dataset profile.
     """
 
     bronze_id = new_id(
@@ -1020,52 +1092,66 @@ def build_file_pipeline_steps(
     )
 
     bronze_code = (
-        "# Bronze ingestion\n"
-        f"# Source file: {file_name}\n"
-        f"# Detected rows: "
-        f"{profile['row_count']}\n"
-        f"# Detected columns: "
-        f"{profile['column_count']}\n"
-        "\n"
-        "# The real uploaded file was read and profiled by "
-        "DataDoctor AI.\n"
+        "# Bronze layer: raw file ingestion\n"
+        f"source_file = {file_name!r}\n"
         "bronze_df = uploaded_dataframe.copy()\n"
-        "bronze_df['ingestion_file'] = "
-        f"'{file_name}'"
+        "\n"
+        "# Preserve source records and ingestion metadata.\n"
+        "bronze_row_count = len(bronze_df)"
     )
 
     silver_code = (
-        "# Silver validation and standardization\n"
-        "silver_df = bronze_df.drop_duplicates().copy()\n"
+        "# Silver layer: cleanse and validate\n"
+        "silver_df = bronze_df.copy()\n"
         "\n"
-        "# Standardized field names, null profiling, "
-        "schema detection,\n"
-        "# completeness checks, uniqueness checks, and "
-        "duplicate analysis\n"
-        "# were calculated from the uploaded dataset."
+        "# Normalize field names.\n"
+        "silver_df.columns = [\n"
+        "    str(column).strip().lower().replace(' ', '_')\n"
+        "    for column in silver_df.columns\n"
+        "]\n"
+        "\n"
+        "# Remove exact duplicate records.\n"
+        "silver_df = silver_df.drop_duplicates()\n"
+        "\n"
+        "# Preserve valid rows for downstream publishing.\n"
+        "silver_row_count = len(silver_df)"
     )
 
-    gold_code = (
-        "# Gold business metrics\n"
-        "# Verified totals and business KPIs are calculated "
-        "only when\n"
-        "# suitable source columns exist.\n"
-        "\n"
-        "gold_metrics = {\n"
-        f"    'row_count': "
-        f"{profile['row_count']},\n"
-        f"    'data_quality_score': "
-        f"{profile['data_quality_score']},\n"
-        f"    'business_metrics': "
-        f"{repr(profile['business_metrics'])},\n"
-        "}"
+    business_metrics = (
+        profile.get(
+            "business_metrics",
+            {},
+        )
     )
+
+    if business_metrics:
+
+        gold_code = (
+            "# Gold layer: publish verified business metrics\n"
+            "gold_metrics = "
+            f"{business_metrics!r}\n"
+            "\n"
+            "# Metrics were calculated from the complete\n"
+            "# uploaded dataset during profiling."
+        )
+
+    else:
+
+        gold_code = (
+            "# Gold layer: publish curated dataset metrics\n"
+            "gold_metrics = {\n"
+            f"    'row_count': {profile.get('row_count', 0)},\n"
+            f"    'column_count': {profile.get('column_count', 0)},\n"
+            "    'data_quality_score': "
+            f"{profile.get('data_quality_score', 0)},\n"
+            "}\n"
+        )
 
     return [
         Step(
             id=bronze_id,
             name=(
-                "Bronze — ingest uploaded file"
+                "Bronze: ingest uploaded file"
             ),
             step_type="source",
             engine="pyspark",
@@ -1075,7 +1161,7 @@ def build_file_pipeline_steps(
         Step(
             id=silver_id,
             name=(
-                "Silver — validate and standardize"
+                "Silver: cleanse and validate"
             ),
             step_type="transform",
             engine="pyspark",
@@ -1087,7 +1173,7 @@ def build_file_pipeline_steps(
         Step(
             id=gold_id,
             name=(
-                "Gold — calculate business outcomes"
+                "Gold: publish business outcomes"
             ),
             step_type="sink",
             engine="pyspark",
@@ -1100,22 +1186,21 @@ def build_file_pipeline_steps(
 
 
 # =========================================================
-# REAL ENTERPRISE FILE INGESTION
+# UPLOADED FILE INGESTION
 # =========================================================
 
 st.subheader(
-    "📂 Enterprise file ingestion"
+    "📂 Build from enterprise data"
 )
 
 st.caption(
-    "Upload a real CSV, Excel, JSON, or Parquet file. "
-    "DataDoctor AI reads the actual records, detects the "
-    "schema, profiles quality, calculates verified metrics, "
-    "and can generate a Bronze → Silver → Gold pipeline."
+    "Upload a real dataset to profile its schema, assess "
+    "quality, calculate verified business outcomes, and "
+    "generate Bronze → Silver → Gold pipeline steps."
 )
 
 uploaded_file = st.file_uploader(
-    "Upload enterprise data",
+    "Upload CSV, Excel, JSON, or Parquet",
     type=[
         "csv",
         "xlsx",
@@ -1123,30 +1208,23 @@ uploaded_file = st.file_uploader(
         "json",
         "parquet",
     ],
-    help=(
-        "The uploaded file is processed in the current "
-        "application session."
-    ),
 )
+
 
 if uploaded_file is not None:
 
-    current_bytes = (
-        uploaded_file.getvalue()
-    )
-
     current_hash = (
-        hashlib
-        .sha256(
-            current_bytes
+        hashlib.sha256(
+            uploaded_file.getvalue()
         )
         .hexdigest()
     )
 
     should_process = (
         current_hash
-        != st.session_state
-        .uploaded_file_hash
+        != st.session_state.get(
+            "uploaded_file_hash"
+        )
     )
 
     if should_process:
@@ -1154,7 +1232,7 @@ if uploaded_file is not None:
         try:
 
             with st.spinner(
-                "Reading and profiling the real file..."
+                "Reading and profiling the uploaded dataset..."
             ):
 
                 dataframe = (
@@ -1162,13 +1240,6 @@ if uploaded_file is not None:
                         uploaded_file
                     )
                 )
-
-                if dataframe.empty:
-
-                    st.warning(
-                        "The file was read successfully, "
-                        "but it contains no data rows."
-                    )
 
                 profile = (
                     build_profile(
@@ -1184,9 +1255,21 @@ if uploaded_file is not None:
                     )
                 )
 
+                # Keep only a lightweight preview in
+                # Streamlit session memory.
+                #
+                # The complete uploaded dataset has already
+                # been used above to calculate:
+                # - row count
+                # - schema
+                # - quality metrics
+                # - numeric summaries
+                # - business outcomes
                 st.session_state[
                     "uploaded_dataframe"
-                ] = dataframe
+                ] = dataframe.head(
+                    100
+                ).copy()
 
                 st.session_state[
                     "uploaded_file_name"
@@ -1202,15 +1285,21 @@ if uploaded_file is not None:
 
                 st.session_state[
                     "dataset_context"
-                ] = profile
+                ] = (
+                    profile
+                )
 
                 st.session_state[
                     "data_profile"
-                ] = profile
+                ] = (
+                    profile
+                )
 
                 st.session_state[
                     "uploaded_dataset_profile"
-                ] = profile
+                ] = (
+                    profile
+                )
 
                 st.session_state[
                     "business_context"
@@ -1228,109 +1317,150 @@ if uploaded_file is not None:
                     ]
                 )
 
-            st.success(
-                f"Successfully read and profiled "
-                f"'{uploaded_file.name}'."
-            )
+                try:
+
+                    store.save_uploaded_file(
+                        {
+                            "id": new_id(
+                                "upload"
+                            ),
+                            "file_name": (
+                                uploaded_file.name
+                            ),
+                            "file_hash": (
+                                current_hash
+                            ),
+                            "row_count": (
+                                profile[
+                                    "row_count"
+                                ]
+                            ),
+                            "column_count": (
+                                profile[
+                                    "column_count"
+                                ]
+                            ),
+                            "profile": (
+                                profile
+                            ),
+                        }
+                    )
+
+                except Exception:
+
+                    pass
+
+                try:
+
+                    store.save_business_insight(
+                        {
+                            "id": new_id(
+                                "insight"
+                            ),
+                            "file_name": (
+                                uploaded_file.name
+                            ),
+                            "business_metrics": (
+                                profile[
+                                    "business_metrics"
+                                ]
+                            ),
+                            "data_quality_score": (
+                                profile[
+                                    "data_quality_score"
+                                ]
+                            ),
+                        }
+                    )
+
+                except Exception:
+
+                    pass
+
+                # Remove the temporary full DataFrame after
+                # profiling. Only the 100-row preview remains
+                # in Streamlit session state.
+                del dataframe
 
         except Exception as error:
 
-            st.session_state[
-                "uploaded_dataframe"
-            ] = None
-
-            st.session_state[
-                "uploaded_file_name"
-            ] = None
-
-            st.session_state[
-                "uploaded_file_hash"
-            ] = None
-
-            st.session_state[
-                "dataset_context"
-            ] = None
-
-            st.session_state[
-                "data_profile"
-            ] = None
-
-            st.session_state[
-                "business_context"
-            ] = None
-
-            st.session_state[
-                "business_outcomes"
-            ] = None
-
             st.error(
-                "The uploaded file could not be processed."
+                "Unable to process the uploaded file: "
+                f"{error}"
             )
 
-            st.exception(
-                error
-            )
+            st.stop()
+            # =========================================================
+# DISPLAY UPLOADED DATASET PROFILE
+# =========================================================
 
-
-dataframe = (
-    st.session_state.get(
-        "uploaded_dataframe"
-    )
+dataframe = st.session_state.get(
+    "uploaded_dataframe"
 )
 
-profile = (
-    st.session_state.get(
-        "dataset_context"
-    )
+profile = st.session_state.get(
+    "uploaded_dataset_profile"
 )
 
 
 if (
-    isinstance(
-        dataframe,
-        pd.DataFrame,
-    )
-    and isinstance(
-        profile,
-        dict,
-    )
+    dataframe is not None
+    and profile
 ):
 
-    metric_1, metric_2, metric_3, metric_4 = (
-        st.columns(4)
+    st.success(
+        "Dataset loaded and profiled successfully."
     )
+
+
+    metric_1, metric_2, metric_3, metric_4 = (
+        st.columns(
+            4
+        )
+    )
+
 
     metric_1.metric(
         "Rows",
         f"{profile['row_count']:,}",
     )
 
+
     metric_2.metric(
         "Columns",
-        profile[
-            "column_count"
-        ],
+        f"{profile['column_count']:,}",
     )
 
+
     metric_3.metric(
-        "Duplicate rows",
+        "Duplicates",
         f"{profile['duplicate_rows']:,}",
     )
 
+
     quality_score = float(
-        profile["data_quality_score"]
+        profile[
+            "data_quality_score"
+        ]
     )
 
+
     quality_score_display = (
-        str(int(quality_score))
+        str(
+            int(
+                quality_score
+            )
+        )
         if quality_score.is_integer()
         else f"{quality_score:.1f}"
     )
+
 
     metric_4.metric(
         "Data quality",
         f"{quality_score_display}/100",
     )
+
 
     preview_tab, schema_tab, quality_tab, business_tab = (
         st.tabs(
@@ -1343,6 +1473,11 @@ if (
         )
     )
 
+
+    # =====================================================
+    # DATA PREVIEW TAB
+    # =====================================================
+
     with preview_tab:
 
         st.dataframe(
@@ -1354,8 +1489,15 @@ if (
         )
 
         st.caption(
-            "Showing up to the first 100 records."
+            "Showing up to the first 100 records. "
+            "The complete uploaded dataset was used for "
+            "profiling and verified metric calculations."
         )
+
+
+    # =====================================================
+    # DETECTED SCHEMA TAB
+    # =====================================================
 
     with schema_tab:
 
@@ -1367,38 +1509,48 @@ if (
             )
         )
 
+
         st.dataframe(
             schema_dataframe,
             use_container_width=True,
             hide_index=True,
         )
 
+
+    # =====================================================
+    # QUALITY PROFILE TAB
+    # =====================================================
+
     with quality_tab:
 
         quality_1, quality_2, quality_3 = (
-            st.columns(3)
+            st.columns(
+                3
+            )
         )
+
 
         quality_1.metric(
             "Completeness",
             (
-                f"{profile['completeness_percentage']}"
-                "%"
+                f"{profile['completeness_percentage']}%"
             ),
         )
+
 
         quality_2.metric(
             "Uniqueness",
             (
-                f"{profile['uniqueness_percentage']}"
-                "%"
+                f"{profile['uniqueness_percentage']}%"
             ),
         )
+
 
         quality_3.metric(
             "Missing cells",
             f"{profile['missing_cells']:,}",
         )
+
 
         null_dataframe = (
             pd.DataFrame(
@@ -1415,15 +1567,22 @@ if (
             )
         )
 
+
         st.markdown(
             "**Missing values by column**"
         )
+
 
         st.dataframe(
             null_dataframe,
             use_container_width=True,
             hide_index=True,
         )
+
+
+    # =====================================================
+    # BUSINESS OUTCOMES TAB
+    # =====================================================
 
     with business_tab:
 
@@ -1434,20 +1593,26 @@ if (
             )
         )
 
+
         if not business_metrics:
 
             st.info(
                 "No standard sales, revenue, cost, profit, "
                 "or quantity fields were detected. The "
                 "dataset is still available for schema, "
-                "quality, and RAG analysis."
+                "quality, pipeline generation, and RAG "
+                "analysis."
             )
+
 
         else:
 
             business_columns = (
-                st.columns(4)
+                st.columns(
+                    4
+                )
             )
+
 
             if (
                 "total_sales"
@@ -1463,6 +1628,7 @@ if (
                     ),
                 )
 
+
             if (
                 "total_cost"
                 in business_metrics
@@ -1476,6 +1642,7 @@ if (
                         f"{business_metrics['total_cost']:,.2f}"
                     ),
                 )
+
 
             if (
                 "total_profit"
@@ -1491,6 +1658,7 @@ if (
                     ),
                 )
 
+
             if (
                 "profit_rate_percentage"
                 in business_metrics
@@ -1501,10 +1669,10 @@ if (
                 ].metric(
                     "Profit rate",
                     (
-                        f"{business_metrics['profit_rate_percentage']:.2f}"
-                        "%"
+                        f"{business_metrics['profit_rate_percentage']:.2f}%"
                     ),
                 )
+
 
             if (
                 "highest_profit_region"
@@ -1517,12 +1685,14 @@ if (
                     ]
                 )
 
+
                 st.success(
                     "Highest-profit region: "
                     f"{highest_region['region']} "
                     "with verified profit of "
                     f"{highest_region['profit']:,.2f}."
                 )
+
 
             if (
                 "highest_profit_product"
@@ -1535,12 +1705,14 @@ if (
                     ]
                 )
 
+
                 st.success(
                     "Highest-profit product: "
                     f"{highest_product['product']} "
                     "with verified profit of "
                     f"{highest_product['profit']:,.2f}."
                 )
+
 
             with st.expander(
                 "View all verified business metrics"
@@ -1549,6 +1721,11 @@ if (
                 st.json(
                     business_metrics
                 )
+
+
+    # =====================================================
+    # GENERATE BRONZE → SILVER → GOLD
+    # =====================================================
 
     if st.button(
         "⚙️ Generate Bronze → Silver → Gold steps",
@@ -1571,15 +1748,17 @@ if (
             )
         )
 
+
         st.success(
             "Generated a three-layer enterprise pipeline "
             "from the uploaded file."
         )
 
+
         st.rerun()
 
 
-st.divider()
+    st.divider()
 
 
 # =========================================================
@@ -1601,82 +1780,99 @@ with st.expander(
         get_templates()
     )
 
-    cols = st.columns(
-        len(
-            templates
-        )
-    )
 
-    for col, (
-        name,
-        template,
-    ) in zip(
-        cols,
-        templates.items(),
-    ):
-
-        with col:
-
-            st.markdown(
-                f"**{name}**"
-            )
-
-            st.caption(
-                template[
-                    "description"
-                ]
-            )
-
-            if st.button(
-                "Use template",
-                key=(
-                    f"tpl-{name}"
-                ),
-            ):
-
-                st.session_state[
-                    "draft_steps"
-                ] = (
-                    template[
-                        "steps"
-                    ]
-                )
-
-                st.rerun()
-
-
-# =========================================================
-# EXISTING MANUAL STEP BUILDER
-# =========================================================
-
-with st.expander(
-    "➕ Add a step",
-    expanded=True,
-):
-
-    c1, c2, c3 = (
-        st.columns(
-            [
-                2,
-                1,
-                1,
-            ]
-        )
-    )
-
-    step_name = (
-        c1.text_input(
-            "Step name",
-            placeholder=(
-                "e.g. Load raw telemetry"
+    template_name = (
+        st.selectbox(
+            "Template",
+            options=list(
+                templates.keys()
             ),
         )
     )
 
+
+    selected_template = (
+        templates[
+            template_name
+        ]
+    )
+
+
+    st.caption(
+        selected_template[
+            "description"
+        ]
+    )
+
+
+    if st.button(
+        "Use this template",
+        use_container_width=True,
+    ):
+
+        st.session_state[
+            "draft_steps"
+        ] = [
+
+            dict(
+                step
+            )
+
+            for step
+
+            in selected_template[
+                "steps"
+            ]
+
+        ]
+
+
+        st.success(
+            "Template loaded into the pipeline draft."
+        )
+
+
+        st.rerun()
+
+
+st.divider()
+
+
+# =========================================================
+# MANUAL STEP BUILDER
+# =========================================================
+
+st.subheader(
+    "Add a pipeline step"
+)
+
+
+with st.form(
+    "add_step_form",
+    clear_on_submit=True,
+):
+
+    step_name = (
+        st.text_input(
+            "Step name",
+            placeholder=(
+                "Example: Validate customer records"
+            ),
+        )
+    )
+
+
+    form_column_1, form_column_2 = (
+        st.columns(
+            2
+        )
+    )
+
+
     step_type = (
-        c2.selectbox(
-            "Type",
-            [
+        form_column_1.selectbox(
+            "Step type",
+            options=[
                 "source",
                 "transform",
                 "sink",
@@ -1684,431 +1880,882 @@ with st.expander(
         )
     )
 
+
     engine = (
-        c3.selectbox(
+        form_column_2.selectbox(
             "Engine",
-            [
+            options=[
                 "pyspark",
                 "sql",
             ],
         )
     )
 
-    code = st.text_area(
-        "Code",
-        placeholder=(
-            "df = spark.read.format"
-            "('delta').load"
-            "('/mnt/bronze/telemetry')"
-        ),
-        height=100,
-    )
 
-    existing_names = [
-        step[
-            "name"
-        ]
-        for step
-        in st.session_state
-        .draft_steps
-    ]
-
-    depends_on = (
-        st.multiselect(
-            "Depends on",
-            options=(
-                existing_names
+    code = (
+        st.text_area(
+            "Code",
+            height=180,
+            placeholder=(
+                "Enter PySpark or SQL logic..."
             ),
         )
     )
 
-    if st.button(
-        "Add step",
-        type="primary",
-    ):
 
-        if (
-            not step_name
-            or not code
-        ):
-
-            st.error(
-                "Step name and code are required."
-            )
-
-        else:
-
-            dependency_ids = [
-                step[
-                    "id"
-                ]
-                for step
-                in st.session_state
-                .draft_steps
-                if step[
-                    "name"
-                ]
-                in depends_on
-            ]
-
-            st.session_state[
-                "draft_steps"
-            ].append(
-                Step(
-                    id=new_id(
-                        "step"
-                    ),
-                    name=(
-                        step_name
-                    ),
-                    step_type=(
-                        step_type
-                    ),
-                    engine=(
-                        engine
-                    ),
-                    code=(
-                        code
-                    ),
-                    depends_on=(
-                        dependency_ids
-                    ),
-                ).__dict__
-            )
-
-            st.rerun()
-
-
-# =========================================================
-# DRAFT PIPELINE STEPS
-# =========================================================
-
-st.subheader(
-    "Draft pipeline steps"
-)
-
-if not st.session_state.draft_steps:
-
-    st.info(
-        "No steps added yet."
+    existing_steps = (
+        st.session_state[
+            "draft_steps"
+        ]
     )
 
-else:
 
-    for index, step in enumerate(
-        st.session_state
-        .draft_steps
-    ):
+    dependency_options = {
 
-        columns = (
-            st.columns(
-                [
-                    5,
-                    1,
-                ]
+        (
+            f"{step.get('name', 'Unnamed step')} "
+            f"· {step.get('id', '')}"
+        ):
+
+        step.get(
+            "id"
+        )
+
+        for step
+
+        in existing_steps
+
+        if step.get(
+            "id"
+        )
+
+    }
+
+
+    selected_dependencies = (
+        st.multiselect(
+            "Depends on",
+            options=list(
+                dependency_options.keys()
+            ),
+            help=(
+                "Select upstream steps that must succeed "
+                "before this step can execute."
+            ),
+        )
+    )
+
+
+    add_step = (
+        st.form_submit_button(
+            "➕ Add step",
+            use_container_width=True,
+        )
+    )
+
+
+if add_step:
+
+    if not step_name.strip():
+
+        st.error(
+            "Enter a step name."
+        )
+
+
+    elif not code.strip():
+
+        st.error(
+            "Enter step code."
+        )
+
+
+    else:
+
+        new_step = (
+            Step(
+                id=new_id(
+                    "step"
+                ),
+                name=(
+                    step_name.strip()
+                ),
+                step_type=(
+                    step_type
+                ),
+                engine=(
+                    engine
+                ),
+                code=(
+                    code.strip()
+                ),
+                depends_on=[
+
+                    dependency_options[
+                        label
+                    ]
+
+                    for label
+
+                    in selected_dependencies
+
+                ],
             )
         )
 
-        with columns[
-            0
-        ]:
 
-            dependencies = (
-                ", ".join(
-                    dependency[
-                        "name"
-                    ]
-                    for dependency
-                    in st.session_state
-                    .draft_steps
-                    if dependency[
-                        "id"
-                    ]
-                    in step[
-                        "depends_on"
-                    ]
-                )
-                or "—"
-            )
-
-            st.markdown(
-                f"**{index + 1}. "
-                f"{step['name']}** "
-                f"&nbsp;`{step['step_type']}` "
-                f"· `{step['engine']}` "
-                f"· depends on: "
-                f"{dependencies}"
-            )
-
-            st.code(
-                step[
-                    "code"
-                ],
-                language=(
-                    "python"
-                    if step[
-                        "engine"
-                    ]
-                    == "pyspark"
-                    else "sql"
-                ),
-            )
-
-        with columns[
-            1
-        ]:
-
-            if st.button(
-                "Remove",
-                key=(
-                    f"remove-"
-                    f"{step['id']}"
-                ),
-            ):
-
-                st.session_state[
-                    "draft_steps"
-                ].pop(
-                    index
-                )
-
-                st.rerun()
+        st.session_state[
+            "draft_steps"
+        ].append(
+            new_step.__dict__
+        )
 
 
-# =========================================================
-# SAVE AND RUN
+        st.success(
+            "Pipeline step added."
+        )
+
+
+        st.rerun()
+        # =========================================================
+# PIPELINE DRAFT
 # =========================================================
 
 st.divider()
 
 st.subheader(
-    "Save & run"
+    "Pipeline draft"
 )
 
-p_name = (
-    st.text_input(
-        "Pipeline name",
-        placeholder=(
-            "e.g. "
-            "bronze-silver-gold-telemetry"
-        ),
-    )
+
+draft_steps = (
+    st.session_state[
+        "draft_steps"
+    ]
 )
 
-p_desc = (
-    st.text_input(
-        "Description",
-        placeholder=(
-            "Daily incremental load with "
-            "SCD2 dimension merge"
-        ),
-    )
-)
 
-c1, c2 = (
-    st.columns(2)
-)
+if not draft_steps:
 
-with c1:
-
-    if st.button(
-        "💾 Save pipeline",
-        disabled=(
-            not st.session_state
-            .draft_steps
-        ),
-    ):
-
-        if not p_name:
-
-            st.error(
-                "Give the pipeline a name."
-            )
-
-        else:
-
-            pipeline = (
-                Pipeline(
-                    id=new_id(
-                        "pipe"
-                    ),
-                    name=(
-                        p_name
-                    ),
-                    description=(
-                        p_desc
-                    ),
-                    steps=(
-                        st.session_state
-                        .draft_steps
-                    ),
-                )
-            )
-
-            pipeline_dict = (
-                pipeline.to_dict()
-            )
-
-            if (
-                isinstance(
-                    profile,
-                    dict,
-                )
-                and st.session_state.get(
-                    "uploaded_file_name"
-                )
-            ):
-
-                pipeline_dict[
-                    "source_file"
-                ] = (
-                    st.session_state[
-                        "uploaded_file_name"
-                    ]
-                )
-
-                pipeline_dict[
-                    "dataset_profile"
-                ] = (
-                    profile
-                )
-
-            store.save_pipeline(
-                pipeline_dict
-            )
-
-            st.session_state[
-                "draft_steps"
-            ] = []
-
-            st.success(
-                f"Saved pipeline "
-                f"'{p_name}'."
-            )
-
-            st.rerun()
-
-
-with c2:
-
-    saved = (
-        store.load_pipelines()
+    st.info(
+        "No pipeline steps have been added yet. "
+        "Upload a dataset, use a quick-start template, "
+        "or add steps manually."
     )
 
-    options = {
-        pipeline[
-            "name"
-        ]: pipeline
-        for pipeline
-        in saved
+
+else:
+
+    step_name_by_id = {
+
+        step.get(
+            "id"
+        ):
+
+        step.get(
+            "name",
+            "Unnamed step",
+        )
+
+        for step
+
+        in draft_steps
+
     }
 
-    if options:
 
-        chosen = (
-            st.selectbox(
-                "Run a saved pipeline",
-                list(
-                    options.keys()
-                ),
+    for index, step in enumerate(
+        draft_steps,
+        start=1,
+    ):
+
+        step_id = (
+            step.get(
+                "id",
+                "",
             )
         )
 
-        if st.button(
-            "▶️ Run pipeline",
-            type="primary",
-        ):
+        step_name = (
+            step.get(
+                "name",
+                "Unnamed step",
+            )
+        )
 
-            selected_pipeline = (
-                options[
-                    chosen
-                ]
+        step_type_value = (
+            step.get(
+                "step_type",
+                "transform",
+            )
+        )
+
+        engine_value = (
+            step.get(
+                "engine",
+                "pyspark",
+            )
+        )
+
+        dependency_ids = (
+            step.get(
+                "depends_on",
+                [],
+            )
+        )
+
+        dependency_names = [
+
+            step_name_by_id.get(
+                dependency_id,
+                dependency_id,
             )
 
-            with st.spinner(
-                f"Running "
-                f"'{chosen}'..."
+            for dependency_id
+
+            in dependency_ids
+
+        ]
+
+
+        with st.expander(
+            (
+                f"{index}. "
+                f"{step_name} "
+                f"· {step_type_value.upper()} "
+                f"· {engine_value.upper()}"
+            ),
+            expanded=True,
+        ):
+
+            detail_1, detail_2, detail_3 = (
+                st.columns(
+                    3
+                )
+            )
+
+
+            detail_1.markdown(
+                "**Step type**"
+            )
+
+            detail_1.write(
+                step_type_value
+            )
+
+
+            detail_2.markdown(
+                "**Engine**"
+            )
+
+            detail_2.write(
+                engine_value
+            )
+
+
+            detail_3.markdown(
+                "**Dependencies**"
+            )
+
+            detail_3.write(
+                (
+                    ", ".join(
+                        dependency_names
+                    )
+                    if dependency_names
+                    else "None"
+                )
+            )
+
+
+            st.markdown(
+                "**Code**"
+            )
+
+
+            st.code(
+                step.get(
+                    "code",
+                    "",
+                ),
+                language=(
+                    "sql"
+                    if engine_value
+                    == "sql"
+                    else "python"
+                ),
+            )
+
+
+            if st.button(
+                "🗑️ Remove step",
+                key=(
+                    f"remove_step_"
+                    f"{step_id}_"
+                    f"{index}"
+                ),
+                use_container_width=False,
             ):
 
-                run = (
-                    run_pipeline(
-                        selected_pipeline
-                    )
+                removed_step_id = (
+                    step_id
                 )
 
-            if (
-                run[
-                    "status"
-                ]
-                == "SUCCEEDED"
-            ):
+
+                updated_steps = []
+
+
+                for current_step in draft_steps:
+
+                    if (
+                        current_step.get(
+                            "id"
+                        )
+                        == removed_step_id
+                    ):
+
+                        continue
+
+
+                    updated_step = dict(
+                        current_step
+                    )
+
+
+                    updated_step[
+                        "depends_on"
+                    ] = [
+
+                        dependency_id
+
+                        for dependency_id
+
+                        in updated_step.get(
+                            "depends_on",
+                            [],
+                        )
+
+                        if dependency_id
+                        != removed_step_id
+
+                    ]
+
+
+                    updated_steps.append(
+                        updated_step
+                    )
+
+
+                st.session_state[
+                    "draft_steps"
+                ] = (
+                    updated_steps
+                )
+
 
                 st.success(
-                    f"Run "
-                    f"{run['id']} "
-                    "succeeded."
+                    "Pipeline step removed."
                 )
 
-                if (
-                    selected_pipeline.get(
-                        "dataset_profile"
-                    )
-                ):
 
-                    restored_profile = (
-                        selected_pipeline[
-                            "dataset_profile"
+                st.rerun()
+
+
+    if st.button(
+        "🧹 Clear pipeline draft",
+        use_container_width=True,
+    ):
+
+        st.session_state[
+            "draft_steps"
+        ] = []
+
+
+        st.success(
+            "Pipeline draft cleared."
+        )
+
+
+        st.rerun()
+
+
+# =========================================================
+# SAVE AND EXECUTE PIPELINE
+# =========================================================
+
+st.divider()
+
+st.subheader(
+    "Save and execute"
+)
+
+
+pipeline_name = (
+    st.text_input(
+        "Pipeline name",
+        placeholder=(
+            "Example: Sales Bronze Silver Gold Pipeline"
+        ),
+    )
+)
+
+
+pipeline_description = (
+    st.text_area(
+        "Pipeline description",
+        placeholder=(
+            "Describe the source, transformations, "
+            "business purpose, and expected output."
+        ),
+        height=110,
+    )
+)
+
+
+save_column, run_column = (
+    st.columns(
+        2
+    )
+)
+
+
+save_pipeline_button = (
+    save_column.button(
+        "💾 Save pipeline",
+        use_container_width=True,
+        disabled=(
+            len(
+                draft_steps
+            )
+            == 0
+        ),
+    )
+)
+
+
+save_and_run_button = (
+    run_column.button(
+        "▶️ Save and run",
+        type="primary",
+        use_container_width=True,
+        disabled=(
+            len(
+                draft_steps
+            )
+            == 0
+        ),
+    )
+)
+
+
+def create_pipeline_record() -> dict:
+    """
+    Create a JSON-safe pipeline record from the current
+    Pipeline Builder draft.
+
+    The uploaded dataset profile is included when the draft
+    was generated from a real file.
+    """
+
+    clean_name = (
+        pipeline_name.strip()
+    )
+
+
+    if not clean_name:
+
+        raise ValueError(
+            "Enter a pipeline name before saving."
+        )
+
+
+    pipeline = (
+        Pipeline(
+            id=new_id(
+                "pipeline"
+            ),
+            name=(
+                clean_name
+            ),
+            description=(
+                pipeline_description
+                .strip()
+            ),
+            steps=[
+
+                Step(
+                    id=(
+                        step[
+                            "id"
                         ]
-                    )
-
-                    st.session_state[
-                        "dataset_context"
-                    ] = (
-                        restored_profile
-                    )
-
-                    st.session_state[
-                        "data_profile"
-                    ] = (
-                        restored_profile
-                    )
-
-                    st.session_state[
-                        "uploaded_dataset_profile"
-                    ] = (
-                        restored_profile
-                    )
-
-                    st.session_state[
-                        "business_context"
-                    ] = (
-                        restored_profile.get(
-                            "business_metrics",
-                            {},
+                    ),
+                    name=(
+                        step[
+                            "name"
+                        ]
+                    ),
+                    step_type=(
+                        step[
+                            "step_type"
+                        ]
+                    ),
+                    engine=(
+                        step.get(
+                            "engine",
+                            "pyspark",
                         )
-                    )
-
-                    st.session_state[
-                        "business_outcomes"
-                    ] = (
-                        restored_profile.get(
-                            "business_metrics",
-                            {},
+                    ),
+                    code=(
+                        step.get(
+                            "code",
+                            "",
                         )
-                    )
-
-                    st.info(
-                        "Verified dataset metrics are now "
-                        "available to Conversational AI "
-                        "in this application session."
-                    )
-
-            else:
-
-                st.error(
-                    f"Run "
-                    f"{run['id']} "
-                    "finished with status "
-                    f"{run['status']}. "
-                    "See Monitor & Repair."
+                    ),
+                    depends_on=list(
+                        step.get(
+                            "depends_on",
+                            [],
+                        )
+                    ),
                 )
+
+                for step
+
+                in st.session_state[
+                    "draft_steps"
+                ]
+
+            ],
+        )
+    )
+
+
+    pipeline_record = (
+        pipeline.to_dict()
+    )
+
+
+    current_profile = (
+        st.session_state.get(
+            "uploaded_dataset_profile"
+        )
+    )
+
+
+    if current_profile:
+
+        pipeline_record[
+            "pipeline_mode"
+        ] = (
+            "FILE_DRIVEN"
+        )
+
+
+        pipeline_record[
+            "source_file_name"
+        ] = (
+            current_profile.get(
+                "file_name"
+            )
+        )
+
+
+        pipeline_record[
+            "source_file_hash"
+        ] = (
+            current_profile.get(
+                "file_hash"
+            )
+        )
+
+
+        pipeline_record[
+            "dataset_profile"
+        ] = (
+            current_profile
+        )
+
+
+        pipeline_record[
+            "business_metrics"
+        ] = (
+            current_profile.get(
+                "business_metrics",
+                {},
+            )
+        )
+
+
+    return pipeline_record
+
+
+# =========================================================
+# SAVE PIPELINE
+# =========================================================
+
+if save_pipeline_button:
+
+    try:
+
+        pipeline_record = (
+            create_pipeline_record()
+        )
+
+
+        store.save_pipeline(
+            pipeline_record
+        )
+
+
+        st.success(
+            (
+                "Pipeline saved successfully: "
+                f"{pipeline_record['name']}."
+            )
+        )
+
+
+    except Exception as error:
+
+        st.error(
+            "Unable to save the pipeline: "
+            f"{error}"
+        )
+
+
+# =========================================================
+# SAVE AND RUN PIPELINE
+# =========================================================
+
+if save_and_run_button:
+
+    try:
+
+        pipeline_record = (
+            create_pipeline_record()
+        )
+
+
+        store.save_pipeline(
+            pipeline_record
+        )
+
+
+        with st.spinner(
+            "Executing the pipeline..."
+        ):
+
+            run = (
+                run_pipeline(
+                    pipeline_record
+                )
+            )
+
+
+        final_status = (
+            run.get(
+                "status",
+                "UNKNOWN",
+            )
+        )
+
+
+        if final_status in (
+            "SUCCEEDED",
+            "REPAIRED",
+        ):
+
+            st.success(
+                (
+                    "Pipeline execution completed with "
+                    f"status: {final_status}."
+                )
+            )
+
+
+        elif final_status == (
+            "PARTIALLY_REPAIRED"
+        ):
+
+            st.warning(
+                "Pipeline execution completed with status: "
+                "PARTIALLY_REPAIRED. Review unresolved or "
+                "skipped steps in Monitor & Repair."
+            )
+
+
+        elif final_status == "RUNNING":
+
+            st.info(
+                "Pipeline execution is still running."
+            )
+
+
+        else:
+
+            st.error(
+                (
+                    "Pipeline execution completed with "
+                    f"status: {final_status}. "
+                    "Open Monitor & Repair for step-level "
+                    "details."
+                )
+            )
+
+
+        st.session_state[
+            "last_pipeline_run"
+        ] = (
+            run
+        )
+
+
+        st.session_state[
+            "last_pipeline_id"
+        ] = (
+            pipeline_record[
+                "id"
+            ]
+        )
+
+
+        st.session_state[
+            "last_run_id"
+        ] = (
+            run.get(
+                "id"
+            )
+        )
+
+
+    except Exception as error:
+
+        st.error(
+            "Unable to save or execute the pipeline: "
+            f"{error}"
+        )
+
+
+# =========================================================
+# LAST EXECUTION SUMMARY
+# =========================================================
+
+last_run = (
+    st.session_state.get(
+        "last_pipeline_run"
+    )
+)
+
+
+if last_run:
+
+    st.divider()
+
+    st.subheader(
+        "Latest execution"
+    )
+
+
+    execution_1, execution_2, execution_3 = (
+        st.columns(
+            3
+        )
+    )
+
+
+    execution_1.metric(
+        "Run ID",
+        last_run.get(
+            "id",
+            "—",
+        ),
+    )
+
+
+    execution_2.metric(
+        "Status",
+        last_run.get(
+            "status",
+            "UNKNOWN",
+        ),
+    )
+
+
+    execution_3.metric(
+        "Pipeline",
+        last_run.get(
+            "pipeline_name",
+            pipeline_name
+            or "—",
+        ),
+    )
+
+
+    step_runs = (
+        last_run.get(
+            "step_runs",
+            [],
+        )
+    )
+
+
+    if step_runs:
+
+        execution_rows = []
+
+
+        for step_run in step_runs:
+
+            execution_rows.append(
+                {
+                    "Step ID": (
+                        step_run.get(
+                            "step_id",
+                            "—",
+                        )
+                    ),
+                    "Status": (
+                        step_run.get(
+                            "status",
+                            "UNKNOWN",
+                        )
+                    ),
+                    "Rows processed": (
+                        step_run.get(
+                            "rows_processed"
+                        )
+                    ),
+                    "Retry count": (
+                        step_run.get(
+                            "retry_count",
+                            0,
+                        )
+                    ),
+                    "Error": (
+                        step_run.get(
+                            "error_message"
+                        )
+                    ),
+                }
+            )
+
+
+        st.dataframe(
+            pd.DataFrame(
+                execution_rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# =========================================================
+# MEMORY INFORMATION
+# =========================================================
+
+st.caption(
+    "Memory-optimized mode: the complete uploaded dataset "
+    "is used temporarily for profiling, while only the first "
+    "100 rows and the verified dataset profile are retained "
+    "in Streamlit session memory."
+)
