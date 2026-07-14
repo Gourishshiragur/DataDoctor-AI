@@ -22,6 +22,21 @@ st.caption("Enterprise-style console for building, monitoring, repairing, and de
 pipelines = store.load_pipelines()
 runs = store.load_runs()
 
+# Show which RAG backend is active
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    rag_status = "🧠 RAG: ChromaDB + sentence-transformers (full vector search)"
+    rag_color = "success"
+except ImportError:
+    rag_status = "📄 RAG: fallback cosine similarity store (no GPU/model needed)"
+    rag_color = "info"
+
+if rag_color == "success":
+    st.success(rag_status)
+else:
+    st.info(rag_status)
+
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Pipelines", len(pipelines))
 col2.metric("Total Runs", len(runs))

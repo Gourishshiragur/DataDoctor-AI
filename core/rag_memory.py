@@ -82,7 +82,11 @@ def _try_chroma():
             metadata={"hnsw:space": "cosine"},
         )
         return collection, ef
+    except (ImportError, ModuleNotFoundError):
+        # chromadb or sentence-transformers not installed — use fallback
+        return None, None
     except Exception:
+        # Installed but failed at runtime (model download, permissions etc.)
         return None, None
 
 
