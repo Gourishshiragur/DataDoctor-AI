@@ -2,19 +2,23 @@
 DataDoctor AI — Enterprise Conversational AI
 
 Features:
-- Multi-turn conversation history
+- Multi-turn conversational AI
 - Free local Ollama integration
+- Automatic Ollama model detection
 - Incident-memory RAG
 - Enterprise document and dataset RAG
 - Uploaded-data grounded answers
+- Calculated analysis context
 - Source-aware responses
-- Automatic zero-cost local diagnostic fallback
-- Existing UI controls preserved
+- Zero-cost troubleshooting fallback
+- Business-impact explanations
+- Existing RAG controls preserved
 """
 
 from __future__ import annotations
 
-from typing import Any, List
+import re
+from typing import Any, Dict, List
 
 import streamlit as st
 
@@ -30,8 +34,15 @@ from core.rag_memory import (
     knowledge_count,
     retrieve_similar,
 )
-from core.ui import inject_global_css, sidebar_brand
+from core.ui import (
+    inject_global_css,
+    sidebar_brand,
+)
 
+
+# =========================================================
+# PAGE UI
+# =========================================================
 
 inject_global_css()
 sidebar_brand()
@@ -39,40 +50,165 @@ sidebar_brand()
 st.title("💬 Conversational AI")
 
 st.caption(
-    "Ask about Spark, PySpark, Delta Lake, SCD2, ADF, "
-    "pipeline architecture, optimization, uploaded data, "
-    "business outcomes, or paste an error for troubleshooting."
+    "Ask about Spark, PySpark, Delta Lake, SCD Type 2, "
+    "Azure Data Factory, pipeline architecture, optimization, "
+    "uploaded data, calculated business outcomes, or paste "
+    "an error for troubleshooting."
 )
 
 
-def local_answer(question: str) -> str:
+# =========================================================
+# ERROR EXTRACTION
+# =========================================================
+
+def extract_error_signal(
+    question: str,
+) -> str:
     """
-    Provide useful zero-cost guidance when Ollama is unavailable.
+    Extract a useful error indicator from pasted logs.
     """
 
-    q = question.lower()
+    text = str(
+        question
+        or ""
+    ).strip()
+
+    patterns = [
+        (
+            r"([A-Za-z]+Exception)"
+            r"\s*:\s*([^\n]+)"
+        ),
+        (
+            r"([A-Za-z]+Error)"
+            r"\s*:\s*([^\n]+)"
+        ),
+        (
+            r"(cannot resolve[^\n]+)"
+        ),
+        (
+            r"(unresolved column[^\n]+)"
+        ),
+        (
+            r"(column[^\n]+"
+            r"not found[^\n]*)"
+        ),
+        (
+            r"(table or view "
+            r"not found[^\n]*)"
+        ),
+        (
+            r"(path does not "
+            r"exist[^\n]*)"
+        ),
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+
+            return (
+                match
+                .group(0)
+                .strip()
+            )
+
+    if not text:
+
+        return ""
+
+    return (
+        text
+        .splitlines()[0][
+            :180
+        ]
+    )
+
+
+# =========================================================
+# BUILT-IN FALLBACK KNOWLEDGE
+# =========================================================
+
+def troubleshooting_answer(
+    question: str,
+) -> str:
+    """
+    Generate useful zero-cost diagnostic guidance when the
+    local Ollama endpoint is unavailable.
+
+    This fallback answers supported questions instead of
+    replacing every answer with Ollama installation steps.
+    """
+
+    original_question = str(
+        question
+        or ""
+    ).strip()
+
+    q = (
+        original_question
+        .lower()
+    )
+
+    error_signal = (
+        extract_error_signal(
+            original_question
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # MISSING COLUMN
+    # -----------------------------------------------------
 
     if (
         "analysisexception" in q
         or "cannot resolve" in q
         or "unresolved column" in q
         or "missing column" in q
-        or "device_id" in q
+        or "column not found" in q
+        or "cannot find column" in q
     ):
-        return """
+
+        return f"""
 ### Diagnosis
 
-The DataFrame may not contain the expected `device_id` column,
-or an earlier transformation may have removed or renamed it.
+The pipeline is referencing a column that is unavailable at
+the failing stage.
 
-Inspect the schema:
+**Detected context**
+
+{error_signal}
+
+### Likely root causes
+
+- The source schema changed.
+- The column was renamed.
+- Column capitalization differs.
+- An earlier select operation removed the field.
+- A join changed the expected column reference.
+- An aggregation removed non-grouped fields.
+- The transformation is using the wrong DataFrame.
+
+### Troubleshooting
+
+Inspect the schema immediately before the failing operation.
+
+Python example:
 
     df.printSchema()
     print(df.columns)
 
-Validate required columns:
+Validate required fields before processing.
 
-    required_columns = ["device_id"]
+    required_columns = [
+        "device_id",
+    ]
 
     missing_columns = [
         column
@@ -82,63 +218,283 @@ Validate required columns:
 
     if missing_columns:
         raise ValueError(
-            f"Missing required columns: {missing_columns}. "
-            f"Available columns: {df.columns}"
+            "Missing required columns: "
+            f"{{missing_columns}}. "
+            "Available columns: "
+            f"{{df.columns}}"
         )
 
-If the source uses another name:
+If the source uses another field name:
 
-    df = df.withColumnRenamed(
-        "deviceId",
-        "device_id",
+    df = (
+        df
+        .withColumnRenamed(
+            "deviceId",
+            "device_id",
+        )
     )
 
-Check earlier `select()`, `join()`, `groupBy()`, aggregation,
-alias, and rename operations.
+Review every earlier:
 
-**Likely root cause:** source-schema mismatch or a required
-column removed during an earlier transformation.
+- select
+- drop
+- withColumnRenamed
+- join
+- groupBy
+- aggregation
+- alias
 
-**Business impact:** the pipeline may fail before producing
-validated downstream data, affecting reporting freshness and
-SLA completion.
+### Recommended fix
+
+Standardize source field names in the Silver layer and
+validate the required schema before business transformations.
+
+### Business outcome
+
+Correct schema validation reduces failed runs, delayed
+reporting, incomplete downstream data, and SLA risk.
 """
+
+
+    # -----------------------------------------------------
+    # NULL ERROR
+    # -----------------------------------------------------
+
+    if (
+        "nullpointerexception" in q
+        or "none type" in q
+        or "nonetype" in q
+        or "null value" in q
+    ):
+
+        return f"""
+### Diagnosis
+
+The error suggests that the pipeline attempted to use an
+object or value that was null or was not initialized.
+
+**Detected context**
+
+{error_signal}
+
+### Troubleshooting
+
+Inspect the value before the failing operation.
+
+    print(type(value))
+    print(value)
+
+For a PySpark DataFrame field:
+
+    from pyspark.sql.functions import col
+
+    null_count = (
+        df
+        .filter(
+            col(
+                "required_column"
+            ).isNull()
+        )
+        .count()
+    )
+
+    print(
+        "Null rows:",
+        null_count,
+    )
+
+### Recommended fix
+
+- Validate required configuration values.
+- Validate DataFrames before transformation.
+- Apply business-approved null-handling rules.
+- Quarantine invalid records when auditability is required.
+- Record rejected-row counts in an audit table.
+- Avoid silently replacing critical business values.
+
+### Business outcome
+
+Controlled null handling improves data completeness and
+prevents unexpected pipeline interruption.
+"""
+
+
+    # -----------------------------------------------------
+    # MEMORY ERROR
+    # -----------------------------------------------------
+
+    if (
+        "outofmemory" in q
+        or "out of memory" in q
+        or "java heap space" in q
+        or "gc overhead" in q
+    ):
+
+        return """
+### Diagnosis
+
+The Spark workload is likely creating excessive memory
+pressure on one or more executors or on the driver.
+
+### Likely causes
+
+- Large data collected to the driver
+- Data skew
+- Oversized partitions
+- Large non-broadcast joins
+- Excessive caching
+- Wide transformations
+- Too many records in one partition
+
+### Troubleshooting
+
+Inspect the execution plan.
+
+    result_df.explain(
+        "formatted"
+    )
+
+Inspect partition distribution.
+
+    partition_counts = (
+        df
+        .rdd
+        .mapPartitions(
+            lambda rows: [
+                sum(
+                    1
+                    for _ in rows
+                )
+            ]
+        )
+        .collect()
+    )
+
+    print(
+        partition_counts
+    )
+
+### Recommended actions
+
+- Remove unnecessary collect and toPandas operations.
+- Filter records early.
+- Select only required fields.
+- Repartition using an appropriate key.
+- Investigate skewed join keys.
+- Broadcast only genuinely small lookup tables.
+- Unpersist cached DataFrames after use.
+- Review executor memory after optimizing the plan.
+
+### Business outcome
+
+Reducing memory pressure improves completion reliability,
+reduces retry effort, and supports predictable SLA delivery.
+"""
+
+
+    # -----------------------------------------------------
+    # FILE OR PATH ERROR
+    # -----------------------------------------------------
+
+    if (
+        "file not found" in q
+        or "path does not exist" in q
+        or "filenotfounderror" in q
+    ):
+
+        return f"""
+### Diagnosis
+
+The pipeline cannot locate the configured source or target
+path.
+
+**Detected context**
+
+{error_signal}
+
+### Validate
+
+- Storage account name
+- Container name
+- Environment-specific base path
+- Date partition
+- File name
+- Mount configuration
+- External location
+- Service-principal permissions
+
+Log the resolved path before reading.
+
+    print(
+        "Resolved path:",
+        source_path,
+    )
+
+### Recommended fix
+
+Use centralized environment configuration and fail early with
+a clear validation message when a required path is missing.
+
+### Business outcome
+
+Reliable path validation prevents avoidable ingestion delays
+and reduces manual investigation effort.
+"""
+
+
+    # -----------------------------------------------------
+    # SCD TYPE 2
+    # -----------------------------------------------------
 
     if (
         "scd2" in q
         or "scd type 2" in q
         or "slowly changing dimension" in q
     ):
+
         return """
 ### SCD Type 2
 
-SCD Type 2 preserves historical versions instead of
-overwriting existing dimension records.
+SCD Type 2 preserves historical dimension values instead of
+overwriting the current record.
 
-Typical columns:
+Typical fields:
 
-    customer_id
+    business_key
     effective_from
     effective_to
     is_current
+    attribute_hash
 
-When an attribute changes:
+When tracked attributes change:
 
-1. Match using the business key.
-2. Close the existing current record.
-3. Update `effective_to`.
-4. Set `is_current` to `false`.
-5. Insert the changed record as a new current version.
+1. Match the current target record using the business key.
+2. Compare tracked attributes or an attribute hash.
+3. Close the previous version.
+4. Set effective_to.
+5. Set is_current to false.
+6. Insert the changed record as a new current version.
 
-For production, combine this with:
+### Enterprise controls
 
-- Delta Lake `MERGE`
-- Business-key matching
-- Hash-based change detection
-- Source deduplication
-- Audit logging
-- Idempotent reruns
+- Deduplicate source records.
+- Validate one current record per business key.
+- Use Delta Lake transactions.
+- Make reruns idempotent.
+- Track inserted, updated, unchanged, and rejected counts.
+- Store batch ID and ingestion timestamp.
+
+### Business outcome
+
+Historical tracking supports accurate point-in-time
+reporting, auditing, customer-history analysis, and
+reproducible business metrics.
 """
+
+
+    # -----------------------------------------------------
+    # DEDUPLICATION
+    # -----------------------------------------------------
 
     if (
         "deduplicate" in q
@@ -146,68 +502,134 @@ For production, combine this with:
         or "duplicate" in q
         or "latest record" in q
     ):
+
         return """
-### Deduplicate and retain the latest event
+### Latest-record deduplication
+
+PySpark example:
 
     from pyspark.sql import Window
-    from pyspark.sql.functions import col, row_number
+
+    from pyspark.sql.functions import (
+        col,
+        row_number,
+    )
 
     window_spec = (
         Window
-        .partitionBy("device_id")
+        .partitionBy(
+            "device_id"
+        )
         .orderBy(
-            col("event_timestamp").desc()
+            col(
+                "event_timestamp"
+            ).desc(),
+            col(
+                "ingestion_timestamp"
+            ).desc(),
         )
     )
 
     latest_df = (
         df
         .withColumn(
-            "row_number",
-            row_number().over(window_spec),
+            "_row_number",
+            row_number().over(
+                window_spec
+            ),
         )
         .filter(
-            col("row_number") == 1
+            col(
+                "_row_number"
+            )
+            == 1
         )
-        .drop("row_number")
+        .drop(
+            "_row_number"
+        )
     )
 
-This retains the newest event for every `device_id`.
+The second ordering field provides deterministic results when
+multiple records have the same event timestamp.
 
-For deterministic results, add a second ordering column such
-as ingestion timestamp or sequence number.
+### Enterprise validation
+
+- Count duplicates before removal.
+- Confirm the correct business key.
+- Preserve duplicate records when auditability is required.
+- Record input, output, rejected, and duplicate counts.
+- Validate rerun behavior.
+
+### Business outcome
+
+Deterministic deduplication prevents double counting and
+improves trust in reporting and downstream analytics.
 """
 
-    if "merge" in q or "upsert" in q:
+
+    # -----------------------------------------------------
+    # DELTA MERGE
+    # -----------------------------------------------------
+
+    if (
+        "merge" in q
+        or "upsert" in q
+    ):
+
         return """
 ### Delta Lake MERGE upsert
 
+PySpark example:
+
     from delta.tables import DeltaTable
 
-    target = DeltaTable.forPath(
-        spark,
-        target_path,
+    target = (
+        DeltaTable
+        .forPath(
+            spark,
+            target_path,
+        )
     )
 
     (
-        target.alias("target")
+        target
+        .alias(
+            "target"
+        )
         .merge(
-            source_df.alias("source"),
-            "target.device_id = source.device_id",
+            source_df.alias(
+                "source"
+            ),
+            (
+                "target.device_id "
+                "= source.device_id"
+            ),
         )
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
 
-For production idempotency:
+### Production controls
 
-- Deduplicate source records before `MERGE`.
+- Deduplicate the source before MERGE.
 - Use a stable business key.
+- Validate the source schema.
 - Track processed batch IDs.
-- Validate source and target counts.
-- Write results to an audit table.
+- Capture inserted and updated counts.
+- Validate source-to-target reconciliation.
+- Make reruns idempotent.
+
+### Business outcome
+
+An idempotent MERGE prevents duplicate target records and
+supports safe replay and recovery.
 """
+
+
+    # -----------------------------------------------------
+    # SPARK OPTIMIZATION
+    # -----------------------------------------------------
 
     if (
         "optimize" in q
@@ -216,29 +638,35 @@ For production idempotency:
         or "slow spark" in q
         or "shuffle" in q
     ):
+
         return """
-### Spark optimization checklist
+### Spark performance assessment
 
-Review these areas:
+Review these areas in order:
 
-- Filter records before joins.
-- Select only required columns.
-- Broadcast genuinely small dimension tables.
-- Reduce unnecessary shuffle operations.
-- Repartition using useful join or write keys.
-- Enable Adaptive Query Execution.
-- Avoid excessive small Delta files.
-- Use partition pruning.
-- Cache only reused DataFrames.
+1. Filter records early.
+2. Select only required fields.
+3. Inspect the physical execution plan.
+4. Reduce unnecessary shuffle operations.
+5. Broadcast only genuinely small dimensions.
+6. Repartition using useful join or write keys.
+7. Investigate skewed keys.
+8. Enable Adaptive Query Execution.
+9. Avoid excessive small Delta files.
+10. Cache only reused DataFrames.
 
 Broadcast example:
 
-    from pyspark.sql.functions import broadcast
+    from pyspark.sql.functions import (
+        broadcast,
+    )
 
     result_df = (
         fact_df
         .join(
-            broadcast(dimension_df),
+            broadcast(
+                dimension_df
+            ),
             "device_id",
             "left",
         )
@@ -246,8 +674,21 @@ Broadcast example:
 
 Inspect the execution plan:
 
-    result_df.explain("formatted")
+    result_df.explain(
+        "formatted"
+    )
+
+### Business outcome
+
+Performance tuning can reduce processing delay, improve SLA
+predictability, and reduce unnecessary compute usage. Exact
+cost savings require measured runtime and infrastructure data.
 """
+
+
+    # -----------------------------------------------------
+    # MEDALLION ARCHITECTURE
+    # -----------------------------------------------------
 
     if (
         "bronze" in q
@@ -255,14 +696,17 @@ Inspect the execution plan:
         or "gold" in q
         or "medallion" in q
     ):
+
         return """
 ### Medallion architecture
 
 **Bronze**
 
 - Raw source data
-- Ingestion metadata
 - Original source values
+- Ingestion metadata
+- Batch ID
+- Source-file information
 - Minimal transformation
 
 **Silver**
@@ -270,54 +714,73 @@ Inspect the execution plan:
 - Schema validation
 - Type conversion
 - Deduplication
-- Data-quality rules
 - Standardization
+- Data-quality rules
 - Business transformations
+- Invalid-record handling
 
 **Gold**
 
-- KPIs
+- Business KPIs
 - Aggregations
 - Reporting datasets
-- Analytics-ready business tables
+- Analytics-ready facts and dimensions
 
 Typical flow:
 
-    ADF or Event Source
-             ↓
-        Bronze Delta
-             ↓
-    Silver Validated Data
-             ↓
-     Gold Business Metrics
+    ADF, files, CDC, or events
+                  |
+                  v
+            Bronze Delta
+                  |
+                  v
+       Silver validated data
+                  |
+                  v
+        Gold business models
+
+### Business outcome
+
+Layer separation improves traceability, replay capability,
+data quality, governance, and confidence in reporting.
 """
+
+
+    # -----------------------------------------------------
+    # AZURE DATA FACTORY
+    # -----------------------------------------------------
 
     if (
         "adf" in q
         or "azure data factory" in q
     ):
+
         return """
 ### Enterprise ADF orchestration
 
 Typical flow:
 
-    Storage Event Trigger
-              ↓
-    Lookup Configuration
-              ↓
-    ForEach Customer or Site
-              ↓
-    Databricks Notebook
-              ↓
-    Audit and Control Tables
+    Storage event or schedule
+                  |
+                  v
+          Lookup configuration
+                  |
+                  v
+       ForEach customer or site
+                  |
+                  v
+          Databricks workflow
+                  |
+                  v
+         Audit and control tables
 
 Useful parameters:
 
-- `customer_id`
-- `site_id`
-- `batch_date`
-- `source_path`
-- `run_id`
+- customer_id
+- site_id
+- batch_date
+- source_path
+- run_id
 
 Use control tables for:
 
@@ -328,7 +791,18 @@ Use control tables for:
 - Reprocessing
 - Error tracking
 - SLA monitoring
+
+### Business outcome
+
+Metadata-driven orchestration reduces duplicated pipeline
+logic and improves scalability, supportability, and audit
+visibility.
 """
+
+
+    # -----------------------------------------------------
+    # STRUCTURED STREAMING
+    # -----------------------------------------------------
 
     if (
         "streaming" in q
@@ -337,40 +811,112 @@ Use control tables for:
         or "autoloader" in q
         or "auto loader" in q
     ):
+
         return """
 ### Spark Structured Streaming
+
+PySpark example:
 
     stream_df = (
         spark
         .readStream
-        .format("cloudFiles")
+        .format(
+            "cloudFiles"
+        )
         .option(
             "cloudFiles.format",
             "json",
         )
-        .load(source_path)
+        .load(
+            source_path
+        )
     )
 
     query = (
         stream_df
         .writeStream
-        .format("delta")
+        .format(
+            "delta"
+        )
         .option(
             "checkpointLocation",
             checkpoint_path,
         )
-        .outputMode("append")
-        .start(target_path)
+        .outputMode(
+            "append"
+        )
+        .start(
+            target_path
+        )
     )
 
-For production:
+### Production controls
 
 - Keep checkpoint locations stable.
 - Use explicit schemas.
-- Handle late events with watermarks.
-- Make `foreachBatch` operations idempotent.
-- Use a separate checkpoint for every stream.
+- Handle late events using event-time watermarks.
+- Make foreachBatch operations idempotent.
+- Use a unique checkpoint for every stream.
+- Monitor input rate, processing rate, batch duration, and
+  state-store growth.
+
+### Business outcome
+
+Reliable streaming controls improve data freshness while
+reducing duplicate processing and recovery risk.
 """
+
+
+    # -----------------------------------------------------
+    # MONITORING
+    # -----------------------------------------------------
+
+    if (
+        "pipeline monitoring" in q
+        or "monitor pipeline" in q
+        or "observability" in q
+        or "sla" in q
+    ):
+
+        return """
+### Enterprise pipeline monitoring
+
+Track:
+
+- Run status
+- Step status
+- Start time
+- Completion time
+- End-to-end duration
+- SLA threshold
+- Input row count
+- Output row count
+- Rejected-row count
+- Retry count
+- Recovery time
+- Data-quality score
+- Source freshness
+- Root-cause category
+
+Recommended control tables:
+
+    pipeline_run_audit
+    pipeline_step_audit
+    data_quality_results
+    watermark_control
+    incident_history
+
+### Business outcome
+
+Operational observability reduces diagnosis time, improves
+SLA visibility, and helps teams identify recurring failures
+before they affect downstream reporting.
+"""
+
+
+    # -----------------------------------------------------
+    # DATA-SPECIFIC QUESTION WITHOUT VERIFIED CONTEXT
+    # -----------------------------------------------------
 
     if (
         "salary" in q
@@ -381,68 +927,122 @@ For production:
         or "lowest" in q
         or "uploaded data" in q
         or "dataset" in q
+        or "csv" in q
     ):
+
         return """
-### Uploaded-data answer unavailable
+### Verified dataset context is required
 
-A verified numerical answer requires the uploaded dataset or
-a calculated analysis result to be available in the current
-application session.
+A numerical answer requires the uploaded dataset or calculated
+analysis results to be available in the current application
+session.
 
-DataDoctor AI will not invent totals, averages, salaries,
-revenue values, trends, or business KPIs.
+DataDoctor AI will not invent:
 
-Upload or analyze the dataset first, then ask the question
-again with RAG enabled.
+- Totals
+- Averages
+- Salaries
+- Revenue values
+- Percentages
+- Trends
+- Anomalies
+- Business KPIs
+
+Upload and process the real CSV through the application,
+confirm that its profile and analysis results are available,
+and then ask the question again.
+
+When verified dataset context is available, the local Ollama
+model can explain calculated values and business outcomes.
 """
 
-    return """
-### DataDoctor AI — Local Diagnostic Mode
 
-The local Ollama model is currently unavailable, so
-DataDoctor AI continued using its zero-cost built-in
-knowledge engine.
+    # -----------------------------------------------------
+    # GENERAL FALLBACK
+    # -----------------------------------------------------
 
-Built-in guidance is available for:
+    return f"""
+### Assessment
 
-- PySpark errors
-- Missing-column problems
+Your question was:
+
+> {original_question}
+
+The free built-in diagnostic engine does not have enough
+specific verified context to produce a reliable custom answer
+for this request.
+
+### Information required
+
+Provide one or more of the following:
+
+- Complete error message
+- Relevant PySpark, SQL, or Python code
+- Pipeline step that failed
+- Source and target technology
+- Expected result
+- Actual result
+- Input schema
+- Pipeline configuration
+- Relevant uploaded document
+- Processed CSV dataset
+
+### Available diagnostic areas
+
+DataDoctor AI can provide built-in guidance for:
+
+- PySpark and Spark errors
+- Missing-column failures
+- Null-related failures
+- Memory and performance issues
 - Delta Lake MERGE
 - SCD Type 2
 - Deduplication
-- Spark optimization
 - Azure Data Factory
 - Medallion architecture
 - Structured Streaming
 - Pipeline monitoring
+- Business and operational impact
 
-For unrestricted local AI responses:
-
-1. Install Ollama.
-2. Run:
-
-    ollama pull llama3.2:3b
-
-3. Start Ollama.
-4. Select the installed model in Chat settings.
+The local Ollama provider is optional. When Ollama is
+available on your laptop, DataDoctor AI uses it for flexible
+natural-language responses. The built-in diagnostic mode
+continues working without paid AI credits.
 """
 
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+# =========================================================
+# SESSION STATE
+# =========================================================
 
+if (
+    "chat_history"
+    not in st.session_state
+):
+
+    st.session_state[
+        "chat_history"
+    ] = []
+
+
+# =========================================================
+# SIDEBAR SETTINGS
+# =========================================================
 
 with st.sidebar:
+
     st.divider()
 
-    st.markdown("**Chat settings**")
+    st.markdown(
+        "**Chat settings**"
+    )
 
     rag_enabled = st.toggle(
         "Use RAG memory",
         value=False,
         help=(
             "Search resolved incidents and indexed "
-            "enterprise file/data context."
+            "enterprise file and data context."
         ),
     )
 
@@ -450,82 +1050,138 @@ with st.sidebar:
         "Stream live LLM responses",
         value=True,
         help=(
-            "Keeps the existing UI option. Local Ollama "
-            "currently returns the completed grounded "
-            "response in one request."
+            "Keeps the existing UI option. Ollama currently "
+            "returns the completed grounded response in one "
+            "request."
         ),
     )
 
-    ollama_status = ollama_health()
+    ollama_status = (
+        ollama_health()
+    )
 
-    installed_models = ollama_status.get(
-        "models",
-        [],
+    installed_models = (
+        ollama_status.get(
+            "models",
+            [],
+        )
     )
 
     if installed_models:
+
         default_index = 0
 
-        if DEFAULT_OLLAMA_MODEL in installed_models:
-            default_index = installed_models.index(
-                DEFAULT_OLLAMA_MODEL
+        if (
+            DEFAULT_OLLAMA_MODEL
+            in installed_models
+        ):
+
+            default_index = (
+                installed_models
+                .index(
+                    DEFAULT_OLLAMA_MODEL
+                )
             )
 
-        selected_model = st.selectbox(
-            "Local AI model",
-            options=installed_models,
-            index=default_index,
-            help=(
-                "Installed Ollama models are free and "
-                "run on your machine."
-            ),
+        selected_model = (
+            st.selectbox(
+                "Local AI model",
+                options=(
+                    installed_models
+                ),
+                index=(
+                    default_index
+                ),
+                help=(
+                    "Installed Ollama models are free and "
+                    "run locally on your laptop."
+                ),
+            )
         )
 
-        st.caption("🟢 Ollama connected")
-
-    else:
-        selected_model = DEFAULT_OLLAMA_MODEL
+        st.success(
+            "Ollama connected"
+        )
 
         st.caption(
-            "🟡 Ollama is not connected. "
-            "Built-in local diagnostic mode remains "
-            "available."
+            "DataDoctor AI will use the selected free local "
+            "model for flexible responses."
+        )
+
+    else:
+
+        selected_model = (
+            DEFAULT_OLLAMA_MODEL
+        )
+
+        st.info(
+            "Built-in diagnostic mode active"
+        )
+
+        st.caption(
+            "Ollama was not detected. Built-in enterprise "
+            "troubleshooting remains available without paid "
+            "AI credits."
         )
 
     if rag_enabled:
+
         st.caption(
-            "📚 RAG will search incident memory and "
-            "indexed enterprise knowledge after you "
-            "submit a question."
+            "RAG searches incident memory and indexed "
+            "enterprise knowledge."
         )
 
         st.caption(
-            f"Incident records: {incident_count()} · "
-            f"Knowledge chunks: {knowledge_count()}"
+            f"Incident records: "
+            f"{incident_count()} · "
+            f"Knowledge chunks: "
+            f"{knowledge_count()}"
         )
 
     else:
+
         st.caption(
-            "🟢 Zero-cost local mode is available."
+            "RAG memory is currently off."
         )
 
     if st.button(
         "Clear chat",
         use_container_width=True,
     ):
-        st.session_state.chat_history = []
+
+        st.session_state[
+            "chat_history"
+        ] = []
 
         st.rerun()
 
 
-for message in st.session_state.chat_history:
+# =========================================================
+# DISPLAY CHAT HISTORY
+# =========================================================
+
+for message in (
+    st.session_state[
+        "chat_history"
+    ]
+):
+
     with st.chat_message(
-        message["role"]
+        message[
+            "role"
+        ]
     ):
+
         st.markdown(
-            message["content"]
+            message[
+                "content"
+            ]
         )
 
+
+# =========================================================
+# CHAT INPUT
+# =========================================================
 
 user_input = st.chat_input(
     "Ask about Spark, uploaded data, business outcomes, "
@@ -533,42 +1189,74 @@ user_input = st.chat_input(
 )
 
 
+# =========================================================
+# PROCESS USER QUESTION
+# =========================================================
+
 if user_input:
+
     previous_history = list(
-        st.session_state.chat_history
+        st.session_state[
+            "chat_history"
+        ]
     )
 
-    st.session_state.chat_history.append(
+    st.session_state[
+        "chat_history"
+    ].append(
         {
             "role": "user",
             "content": user_input,
         }
     )
 
-    with st.chat_message("user"):
-        st.markdown(user_input)
+    with st.chat_message(
+        "user"
+    ):
+
+        st.markdown(
+            user_input
+        )
+
+
+    # -----------------------------------------------------
+    # RAG CONTEXT
+    # -----------------------------------------------------
 
     incident_context = ""
 
     enterprise_context = ""
 
-    source_names: List[str] = []
+    source_names: List[
+        str
+    ] = []
 
     similar_incidents = []
 
-    enterprise_rag = {
+    enterprise_rag: Dict[
+        str,
+        Any,
+    ] = {
         "retrieved": False,
         "context": "",
         "sources": [],
         "matches": [],
     }
 
+
     if rag_enabled:
+
         try:
+
             with st.spinner(
                 "Searching RAG memory..."
             ):
-                if incident_count() > 0:
+
+                if (
+                    incident_count()
+                    > 0
+                ):
+
                     similar_incidents = (
                         retrieve_similar(
                             user_input,
@@ -576,18 +1264,29 @@ if user_input:
                         )
                     )
 
-                if knowledge_count() > 0:
+                if (
+                    knowledge_count()
+                    > 0
+                ):
+
                     enterprise_rag = (
                         get_rag_context(
-                            query=user_input,
+                            query=(
+                                user_input
+                            ),
                             k=5,
                         )
                     )
 
+
             if similar_incidents:
+
                 incident_parts = []
 
-                for result in similar_incidents:
+                for result in (
+                    similar_incidents
+                ):
+
                     incident_parts.append(
                         (
                             "Past resolved incident "
@@ -604,17 +1303,22 @@ if user_input:
                         )
                     )
 
-                incident_context = "\n\n".join(
-                    incident_parts
+                incident_context = (
+                    "\n\n"
+                    .join(
+                        incident_parts
+                    )
                 )
 
                 source_names.append(
                     "DataDoctor incident memory"
                 )
 
+
             if enterprise_rag.get(
                 "retrieved"
             ):
+
                 enterprise_context = (
                     enterprise_rag.get(
                         "context",
@@ -622,29 +1326,48 @@ if user_input:
                     )
                 )
 
-                for source in enterprise_rag.get(
-                    "sources",
-                    [],
+                for source in (
+                    enterprise_rag.get(
+                        "sources",
+                        [],
+                    )
                 ):
-                    if source not in source_names:
+
+                    if (
+                        source
+                        not in source_names
+                    ):
+
                         source_names.append(
                             source
                         )
 
+
         except Exception:
+
             st.warning(
                 "RAG memory is temporarily unavailable. "
-                "Continuing without retrieved context."
+                "Continuing with local AI or built-in "
+                "diagnostics."
             )
 
-    combined_rag_context = "\n\n".join(
-        context
-        for context in [
-            incident_context,
-            enterprise_context,
-        ]
-        if context
+
+    combined_rag_context = (
+        "\n\n"
+        .join(
+            context
+            for context in [
+                incident_context,
+                enterprise_context,
+            ]
+            if context
+        )
     )
+
+
+    # -----------------------------------------------------
+    # REAL DATASET AND ANALYSIS CONTEXT
+    # -----------------------------------------------------
 
     dataset_context: Any = (
         st.session_state.get(
@@ -655,6 +1378,9 @@ if user_input:
         )
         or st.session_state.get(
             "dataset_profile"
+        )
+        or st.session_state.get(
+            "uploaded_dataset_profile"
         )
     )
 
@@ -668,6 +1394,9 @@ if user_input:
         or st.session_state.get(
             "quality_report"
         )
+        or st.session_state.get(
+            "data_quality_report"
+        )
     )
 
     business_context: Any = (
@@ -677,86 +1406,202 @@ if user_input:
         or st.session_state.get(
             "business_insights"
         )
+        or st.session_state.get(
+            "business_outcomes"
+        )
     )
+
+
+    # -----------------------------------------------------
+    # GENERATE RESPONSE
+    # -----------------------------------------------------
 
     with st.chat_message(
         "assistant"
     ):
+
         response_placeholder = None
 
         if stream_enabled:
-            response_placeholder = st.empty()
+
+            response_placeholder = (
+                st.empty()
+            )
 
             response_placeholder.markdown(
                 "Analyzing verified context..."
             )
 
+
         with st.spinner(
             "DataDoctor AI is analyzing..."
         ):
-            result = ask_data_doctor(
-                question=user_input,
-                dataset_context=dataset_context,
-                rag_context=(
-                    combined_rag_context
-                    or None
-                ),
-                business_context=(
-                    business_context
-                ),
-                analysis_context=(
-                    analysis_context
-                ),
-                source_names=source_names,
-                model=selected_model,
-                base_url=DEFAULT_OLLAMA_URL,
-                chat_history=previous_history,
-                temperature=0.1,
+
+            result = (
+                ask_data_doctor(
+                    question=(
+                        user_input
+                    ),
+                    dataset_context=(
+                        dataset_context
+                    ),
+                    rag_context=(
+                        combined_rag_context
+                        or None
+                    ),
+                    business_context=(
+                        business_context
+                    ),
+                    analysis_context=(
+                        analysis_context
+                    ),
+                    source_names=(
+                        source_names
+                    ),
+                    model=(
+                        selected_model
+                    ),
+                    base_url=(
+                        DEFAULT_OLLAMA_URL
+                    ),
+                    chat_history=(
+                        previous_history
+                    ),
+                    temperature=0.1,
+                )
             )
 
-        if result.get("success"):
-            response_text = result.get(
-                "answer",
-                "",
-            )
+
+        # -------------------------------------------------
+        # OLLAMA RESPONSE
+        # -------------------------------------------------
+
+        if result.get(
+            "success"
+        ):
+
+            response_text = str(
+                result.get(
+                    "answer",
+                    "",
+                )
+            ).strip()
+
+            if not response_text:
+
+                response_text = (
+                    "The local model returned an empty "
+                    "response."
+                )
+
 
             if response_placeholder:
+
                 response_placeholder.markdown(
                     response_text
                 )
 
             else:
+
                 st.markdown(
                     response_text
                 )
 
+
+            st.caption(
+                "Response provider: free local Ollama · "
+                f"Model: {selected_model}"
+            )
+
+
             if source_names:
+
                 st.caption(
-                    "📚 Grounded with RAG context from: "
+                    "Grounded with RAG context from: "
                     + ", ".join(
                         source_names
                     )
                 )
 
+
+            if (
+                dataset_context
+                or analysis_context
+            ):
+
+                st.caption(
+                    "Verified uploaded-data or calculated "
+                    "analysis context was supplied to the "
+                    "response."
+                )
+
+
+        # -------------------------------------------------
+        # BUILT-IN FALLBACK
+        # -------------------------------------------------
+
         else:
-            response_text = local_answer(
-                user_input
+
+            response_text = (
+                troubleshooting_answer(
+                    user_input
+                )
             )
+
 
             if response_placeholder:
-                response_placeholder.empty()
+
+                response_placeholder.markdown(
+                    response_text
+                )
+
+            else:
+
+                st.markdown(
+                    response_text
+                )
+
 
             st.caption(
-                "🟢 DataDoctor local diagnostic mode"
+                "Response provider: DataDoctor AI "
+                "zero-cost built-in diagnostic engine"
             )
 
-            st.markdown(
-                response_text
-            )
 
-    st.session_state.chat_history.append(
+            if source_names:
+
+                st.caption(
+                    "Retrieved RAG context available from: "
+                    + ", ".join(
+                        source_names
+                    )
+                )
+
+
+            if (
+                dataset_context
+                or analysis_context
+            ):
+
+                st.caption(
+                    "Dataset context is available, but the "
+                    "local Ollama provider was unavailable. "
+                    "No unsupported numerical answer was "
+                    "generated."
+                )
+
+
+    # -----------------------------------------------------
+    # SAVE ASSISTANT RESPONSE
+    # -----------------------------------------------------
+
+    st.session_state[
+        "chat_history"
+    ].append(
         {
             "role": "assistant",
-            "content": response_text,
+            "content": (
+                response_text
+            ),
         }
     )

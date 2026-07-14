@@ -1,15 +1,17 @@
 """
 DataDoctor AI — Enterprise Pipeline Analytics
 
-Preserves the existing Analytics UI while adding:
-- Operational health score
-- Run trends
-- Status distribution
+Features:
+- Enterprise operational KPI cards
+- Smart operational-health score formatting
+- Modern interactive Plotly analytics
+- Run-volume trends
+- Pipeline-status distribution
 - Failure-pattern analysis
-- Pipeline reliability
-- Recovery rate
-- Business impact
-- Risk classification
+- Pipeline reliability comparison
+- Recovery effectiveness
+- Business impact assessment
+- Operational-risk classification
 - Prioritized recommendations
 """
 
@@ -21,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from core import store
@@ -30,11 +33,12 @@ from core.ui import inject_global_css, sidebar_brand
 inject_global_css()
 sidebar_brand()
 
-st.title("📈 Analytics")
+st.title("📈 Enterprise Analytics")
 
 st.caption(
-    "Run trends, reliability, operational health, failure "
-    "patterns, and business outcomes across all pipelines."
+    "Operational intelligence for pipeline reliability, "
+    "recovery effectiveness, failure patterns, service risk, "
+    "and business outcomes."
 )
 
 
@@ -53,6 +57,39 @@ REPAIRED_STATUSES = {
     "PARTIALLY_REPAIRED",
     "REPAIRED",
     "RECOVERED",
+}
+
+
+STATUS_COLORS = {
+    "SUCCEEDED": "#22C55E",
+    "SUCCESS": "#22C55E",
+    "COMPLETED": "#22C55E",
+    "REPAIRED": "#38BDF8",
+    "RECOVERED": "#38BDF8",
+    "PARTIALLY_REPAIRED": "#F59E0B",
+    "FAILED": "#EF4444",
+    "ERROR": "#EF4444",
+    "UNKNOWN": "#94A3B8",
+}
+
+
+PLOT_LAYOUT = {
+    "paper_bgcolor": "rgba(0,0,0,0)",
+    "plot_bgcolor": "rgba(0,0,0,0)",
+    "font": {
+        "color": "#CBD5E1",
+        "family": "Inter, sans-serif",
+    },
+    "margin": {
+        "l": 20,
+        "r": 20,
+        "t": 30,
+        "b": 20,
+    },
+    "hoverlabel": {
+        "bgcolor": "#111827",
+        "font_color": "#F8FAFC",
+    },
 }
 
 
@@ -112,14 +149,10 @@ def parse_timestamp(
     except ValueError:
         pass
 
-    timestamp_formats = [
+    for timestamp_format in [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
-    ]
-
-    for timestamp_format in (
-        timestamp_formats
-    ):
+    ]:
         try:
             return datetime.strptime(
                 text,
@@ -260,6 +293,32 @@ def calculate_health_score(
     )
 
 
+def format_score(
+    score: float,
+) -> str:
+    """
+    Keep useful decimal precision.
+
+    Examples:
+    97.8 -> 97.8
+    93.0 -> 93
+    100.0 -> 100
+    """
+
+    numeric_score = float(
+        score
+    )
+
+    if numeric_score.is_integer():
+        return f"{numeric_score:.0f}"
+
+    return (
+        f"{numeric_score:.1f}"
+        .rstrip("0")
+        .rstrip(".")
+    )
+
+
 def risk_level(
     success_rate: float,
     failed_runs: int,
@@ -282,13 +341,27 @@ def risk_level(
     return "Critical"
 
 
+def risk_color(
+    risk: str,
+) -> str:
+    return {
+        "Low": "#22C55E",
+        "Moderate": "#F59E0B",
+        "High": "#F97316",
+        "Critical": "#EF4444",
+    }.get(
+        risk,
+        "#94A3B8",
+    )
+
+
 runs = store.load_runs()
 
 
 if not runs:
     st.info(
         "No runs yet — create and run a pipeline from "
-        "**Pipeline Builder** to see analytics here."
+        "**Pipeline Builder** to see enterprise analytics."
     )
 
     st.stop()
@@ -366,6 +439,12 @@ health_score = (
     )
 )
 
+health_display = (
+    format_score(
+        health_score
+    )
+)
+
 current_risk = (
     risk_level(
         success_rate,
@@ -408,11 +487,11 @@ health_1, health_2, health_3 = (
 
 health_1.metric(
     "Operational health",
-    f"{health_score:.1f}/100",
+    f"{health_display}/100",
 )
 
 health_2.metric(
-    "Recovery rate",
+    "Recovery effectiveness",
     f"{recovery_rate:.0f}%",
 )
 
@@ -425,14 +504,14 @@ health_3.metric(
 if health_score >= 90:
     st.success(
         "Pipeline operations are currently healthy. "
-        "Continue monitoring reliability and recurring "
-        "failure patterns."
+        "Continue monitoring reliability, recovery quality, "
+        "and recurring failure patterns."
     )
 
 elif health_score >= 70:
     st.warning(
-        "Pipeline operations are functional but reliability "
-        "improvements are recommended."
+        "Pipeline operations are functional, but targeted "
+        "reliability improvements are recommended."
     )
 
 else:
@@ -446,14 +525,20 @@ else:
 st.divider()
 
 
+st.subheader(
+    "Operational intelligence"
+)
+
 left, right = (
-    st.columns(2)
+    st.columns(
+        [1.55, 1]
+    )
 )
 
 
 with left:
-    st.subheader(
-        "Runs over time"
+    st.markdown(
+        "**Pipeline run trend**"
     )
 
     by_day = Counter(
@@ -473,90 +558,162 @@ with left:
         )
     ]
 
-    if trend_rows:
-        trend_df = pd.DataFrame(
-            trend_rows
-        )
+    trend_df = pd.DataFrame(
+        trend_rows
+    )
 
-        trend_chart = px.bar(
-            trend_df,
-            x="Date",
-            y="Runs",
-            title=None,
-        )
+    trend_chart = go.Figure()
 
-        trend_chart.update_layout(
-            xaxis_title="Run date",
-            yaxis_title="Number of runs",
-            showlegend=False,
-            margin=dict(
-                l=10,
-                r=10,
-                t=10,
-                b=10,
+    trend_chart.add_trace(
+        go.Scatter(
+            x=trend_df[
+                "Date"
+            ],
+            y=trend_df[
+                "Runs"
+            ],
+            mode=(
+                "lines+markers"
+            ),
+            name="Pipeline runs",
+            line={
+                "width": 4,
+                "color": "#38BDF8",
+                "shape": "spline",
+            },
+            marker={
+                "size": 10,
+                "color": "#A78BFA",
+                "line": {
+                    "width": 2,
+                    "color": "#E0F2FE",
+                },
+            },
+            fill="tozeroy",
+            fillcolor=(
+                "rgba(56, 189, 248, 0.12)"
+            ),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Runs: %{y}"
+                "<extra></extra>"
             ),
         )
+    )
 
-        st.plotly_chart(
-            trend_chart,
-            use_container_width=True,
-        )
+    trend_chart.update_layout(
+        **PLOT_LAYOUT,
+        height=360,
+        showlegend=False,
+        xaxis={
+            "title": "",
+            "showgrid": False,
+            "linecolor": (
+                "rgba(148,163,184,0.2)"
+            ),
+        },
+        yaxis={
+            "title": "Run volume",
+            "rangemode": "tozero",
+            "gridcolor": (
+                "rgba(148,163,184,0.12)"
+            ),
+            "zeroline": False,
+        },
+    )
 
-        known_days = [
-            day
-            for day in by_day
-            if day != "Unknown"
-        ]
-
-        if known_days:
-            st.caption(
-                f"{min(known_days)} → "
-                f"{max(known_days)}"
-            )
+    st.plotly_chart(
+        trend_chart,
+        use_container_width=True,
+        config={
+            "displayModeBar": False,
+        },
+    )
 
 
 with right:
-    st.subheader(
-        "Status breakdown"
+    st.markdown(
+        "**Run-status distribution**"
     )
 
     status_counts = Counter(
         statuses
     )
 
-    status_df = pd.DataFrame(
-        [
-            {
-                "Status": status,
-                "Runs": count,
-            }
-            for status, count
-            in status_counts.items()
+    status_labels = list(
+        status_counts.keys()
+    )
+
+    status_values = [
+        status_counts[
+            status
+        ]
+        for status in status_labels
+    ]
+
+    status_chart = go.Figure(
+        data=[
+            go.Pie(
+                labels=(
+                    status_labels
+                ),
+                values=(
+                    status_values
+                ),
+                hole=0.67,
+                marker={
+                    "colors": [
+                        STATUS_COLORS.get(
+                            status,
+                            "#94A3B8",
+                        )
+                        for status
+                        in status_labels
+                    ],
+                    "line": {
+                        "color": "#0B1220",
+                        "width": 3,
+                    },
+                },
+                textinfo=(
+                    "label+percent"
+                ),
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "Runs: %{value}<br>"
+                    "Share: %{percent}"
+                    "<extra></extra>"
+                ),
+            )
         ]
     )
 
-    status_chart = px.bar(
-        status_df,
-        x="Status",
-        y="Runs",
-        title=None,
+    status_chart.add_annotation(
+        text=(
+            f"<b>{total}</b>"
+            "<br>runs"
+        ),
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font={
+            "size": 22,
+            "color": "#F8FAFC",
+        },
     )
 
     status_chart.update_layout(
-        xaxis_title="Run status",
-        yaxis_title="Number of runs",
+        **PLOT_LAYOUT,
+        height=360,
         showlegend=False,
-        margin=dict(
-            l=10,
-            r=10,
-            t=10,
-            b=10,
-        ),
     )
 
     st.plotly_chart(
         status_chart,
         use_container_width=True,
+        config={
+            "displayModeBar": False,
+        },
     )
 
 
@@ -564,7 +721,7 @@ st.divider()
 
 
 st.subheader(
-    "Most common failure reasons"
+    "Failure intelligence"
 )
 
 
@@ -575,14 +732,10 @@ for run in valid_runs:
     for step_run in get_step_runs(
         run
     ):
-        error_message = (
+        reason = get_error_reason(
             step_run.get(
                 "error_message"
             )
-        )
-
-        reason = get_error_reason(
-            error_message
         )
 
         if reason:
@@ -593,7 +746,8 @@ for run in valid_runs:
 
 if not error_counter:
     st.success(
-        "No step failures recorded yet."
+        "No step-level failure patterns are currently "
+        "recorded."
     )
 
 else:
@@ -608,8 +762,14 @@ else:
         )
     ]
 
-    failure_df = pd.DataFrame(
-        failure_rows
+    failure_df = (
+        pd.DataFrame(
+            failure_rows
+        )
+        .sort_values(
+            "Occurrences",
+            ascending=True,
+        )
     )
 
     failure_chart = px.bar(
@@ -617,49 +777,60 @@ else:
         x="Occurrences",
         y="Failure reason",
         orientation="h",
-        title=None,
+        text="Occurrences",
+    )
+
+    failure_chart.update_traces(
+        marker_color="#F97316",
+        marker_line_color=(
+            "rgba(255,255,255,0.18)"
+        ),
+        marker_line_width=1,
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Occurrences: %{x}"
+            "<extra></extra>"
+        ),
     )
 
     failure_chart.update_layout(
-        xaxis_title="Occurrences",
-        yaxis_title="",
-        showlegend=False,
-        margin=dict(
-            l=10,
-            r=10,
-            t=10,
-            b=10,
+        **PLOT_LAYOUT,
+        height=max(
+            320,
+            len(
+                failure_rows
+            )
+            * 58,
         ),
+        showlegend=False,
+        xaxis={
+            "title": "Occurrences",
+            "showgrid": True,
+            "gridcolor": (
+                "rgba(148,163,184,0.12)"
+            ),
+        },
+        yaxis={
+            "title": "",
+            "showgrid": False,
+        },
     )
 
     st.plotly_chart(
         failure_chart,
         use_container_width=True,
+        config={
+            "displayModeBar": False,
+        },
     )
-
-    for reason, count in (
-        error_counter.most_common(
-            8
-        )
-    ):
-        columns = st.columns(
-            [4, 1]
-        )
-
-        columns[0].write(
-            reason
-        )
-
-        columns[1].write(
-            f"**{count}×**"
-        )
 
 
 st.divider()
 
 
 st.subheader(
-    "Reliability by pipeline"
+    "Pipeline reliability"
 )
 
 
@@ -671,7 +842,6 @@ pipeline_names = sorted(
         for run in valid_runs
     }
 )
-
 
 reliability_rows = []
 
@@ -739,41 +909,108 @@ for name in pipeline_names:
     )
 
 
-reliability_rows.sort(
-    key=lambda row: (
-        row[
-            "Success rate"
-        ]
+reliability_df = (
+    pd.DataFrame(
+        reliability_rows
+    )
+    .sort_values(
+        "Success rate",
+        ascending=True,
     )
 )
 
 
-for row in reliability_rows:
-    st.markdown(
-        f"**{row['Pipeline']}** — "
-        f"{row['Runs']} runs, "
-        f"{row['Success rate']:.0f}% "
-        "success rate"
-    )
+reliability_chart = go.Figure()
 
-    st.progress(
-        max(
-            0.0,
-            min(
-                1.0,
-                row[
-                    "Success rate"
+
+reliability_chart.add_trace(
+    go.Bar(
+        x=reliability_df[
+            "Success rate"
+        ],
+        y=reliability_df[
+            "Pipeline"
+        ],
+        orientation="h",
+        marker={
+            "color": reliability_df[
+                "Success rate"
+            ],
+            "colorscale": [
+                [0.0, "#EF4444"],
+                [0.6, "#F59E0B"],
+                [1.0, "#22C55E"],
+            ],
+            "cmin": 0,
+            "cmax": 100,
+        },
+        text=[
+            f"{value:.0f}%"
+            for value
+            in reliability_df[
+                "Success rate"
+            ]
+        ],
+        textposition="outside",
+        customdata=(
+            reliability_df[
+                [
+                    "Runs",
+                    "Succeeded",
+                    "Repaired",
+                    "Failed",
                 ]
-                / 100,
-            ),
-        )
+            ]
+            .to_numpy()
+        ),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Success rate: %{x:.1f}%<br>"
+            "Runs: %{customdata[0]}<br>"
+            "Succeeded: %{customdata[1]}<br>"
+            "Repaired: %{customdata[2]}<br>"
+            "Failed: %{customdata[3]}"
+            "<extra></extra>"
+        ),
     )
+)
 
-    st.caption(
-        f"Succeeded: {row['Succeeded']} · "
-        f"Repaired: {row['Repaired']} · "
-        f"Failed: {row['Failed']}"
-    )
+
+reliability_chart.update_layout(
+    **PLOT_LAYOUT,
+    height=max(
+        320,
+        len(
+            reliability_rows
+        )
+        * 65,
+    ),
+    showlegend=False,
+    xaxis={
+        "title": "Success rate",
+        "range": [
+            0,
+            108,
+        ],
+        "ticksuffix": "%",
+        "gridcolor": (
+            "rgba(148,163,184,0.12)"
+        ),
+    },
+    yaxis={
+        "title": "",
+        "showgrid": False,
+    },
+)
+
+
+st.plotly_chart(
+    reliability_chart,
+    use_container_width=True,
+    config={
+        "displayModeBar": False,
+    },
+)
 
 
 st.divider()
@@ -784,65 +1021,84 @@ st.subheader(
 )
 
 
-impact_1, impact_2 = (
-    st.columns(2)
+impact_1, impact_2, impact_3 = (
+    st.columns(3)
 )
 
 
 with impact_1:
     st.markdown(
-        "**Current operational assessment**"
+        "#### Data availability"
     )
 
     if failed > 0:
-        st.warning(
-            f"{failed} unresolved pipeline run(s) may "
-            "affect data freshness, downstream reporting, "
-            "analytics availability, and SLA completion."
+        st.error(
+            f"{failed} unresolved run(s) may delay data "
+            "availability for reporting, analytics, or "
+            "downstream consumers."
         )
 
     elif repaired > 0:
         st.info(
-            "Automated or partial recovery reduced the "
-            "number of unresolved failures. Repaired runs "
-            "should still be reviewed for recurring causes."
+            "Recovery reduced unresolved disruption, but "
+            "repaired outputs should be validated for "
+            "completeness and consistency."
         )
 
     else:
         st.success(
-            "No unresolved pipeline failures are currently "
+            "No unresolved run failures are currently "
             "recorded."
         )
 
 
 with impact_2:
     st.markdown(
-        "**Decision-support interpretation**"
+        "#### Operational efficiency"
+    )
+
+    if repaired > 0:
+        st.success(
+            "Automated or assisted recovery reduced manual "
+            "intervention and prevented the repaired runs "
+            "from remaining unresolved."
+        )
+
+    else:
+        st.info(
+            "No recovery events are currently recorded. "
+            "Continue measuring retry effort and manual "
+            "intervention."
+        )
+
+
+with impact_3:
+    st.markdown(
+        "#### Decision confidence"
     )
 
     if success_rate >= 95:
         st.success(
-            "High reliability supports timely downstream "
-            "reporting and business decision-making."
+            "High run reliability supports timely reporting "
+            "and stronger confidence in downstream data."
         )
 
     elif success_rate >= 80:
         st.warning(
-            "Reliability is acceptable but recurring "
-            "failures may create reporting delays or "
-            "additional operational effort."
+            "Current reliability is usable, but recurring "
+            "issues may create reporting delays or extra "
+            "operational effort."
         )
 
     else:
         st.error(
             "Low reliability may reduce trust in downstream "
-            "data products and increase manual recovery "
-            "effort."
+            "data products and business decisions."
         )
 
 
 st.markdown(
-    "**Prioritized recommendations**"
+    "### Prioritized recommendations"
 )
 
 
@@ -853,8 +1109,8 @@ if failed > 0:
     recommendations.append(
         (
             "Critical",
-            "Investigate unresolved failed runs first and "
-            "validate whether downstream datasets or reports "
+            "Investigate unresolved runs and validate whether "
+            "downstream datasets, reports, or SLA deliveries "
             "are incomplete.",
         )
     )
@@ -870,9 +1126,9 @@ if error_counter:
     recommendations.append(
         (
             "High",
-            f"Create a permanent validation or remediation "
-            f"rule for the recurring failure pattern "
-            f"'{top_reason}', recorded {top_count} time(s).",
+            "Create a permanent validation or remediation "
+            f"rule for '{top_reason}', which occurred "
+            f"{top_count} time(s).",
         )
     )
 
@@ -890,7 +1146,7 @@ if low_reliability:
     recommendations.append(
         (
             "High",
-            "Prioritize reliability improvements for: "
+            "Prioritize reliability improvements for "
             + ", ".join(
                 row[
                     "Pipeline"
@@ -909,8 +1165,8 @@ if repaired > 0:
     recommendations.append(
         (
             "Medium",
-            "Review repaired runs to confirm data quality, "
-            "idempotency, and completeness after recovery.",
+            "Validate repaired runs for data completeness, "
+            "quality, idempotency, and downstream consistency.",
         )
     )
 
@@ -919,8 +1175,8 @@ recommendations.append(
     (
         "Continuous",
         "Track SLA duration, source-to-target row counts, "
-        "data-quality scores, retry counts, and recurring "
-        "root causes for production monitoring.",
+        "data-quality scores, retry counts, recovery time, "
+        "and recurring root causes.",
     )
 )
 
