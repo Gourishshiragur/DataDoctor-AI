@@ -106,6 +106,12 @@ and mention source names when available.
 
 10. Be concise while providing enough explanation for
 business and technical users.
+
+11. Use correct standard data-engineering terminology.
+Always write "SCD Type 2", meaning "Slowly Changing
+Dimension Type 2". Never rename it as "SDC Type 2".
+Correct obvious spelling mistakes in the user's question
+before answering.
 """.strip()
 
 
@@ -528,10 +534,16 @@ def chat_with_ollama(
     ]
 
 
-    chat_messages.extend(
+    # Keep only recent conversation turns to reduce local
+    # inference latency while preserving multi-turn context.
+    recent_messages = (
         _normalise_messages(
             messages
-        )
+        )[-6:]
+    )
+
+    chat_messages.extend(
+        recent_messages
     )
 
 
@@ -553,7 +565,14 @@ def chat_with_ollama(
             "temperature": float(
                 temperature
             ),
+            # Limit prompt processing and response length for
+            # faster local CPU inference.
+            "num_ctx": 4096,
+            "num_predict": 600,
         },
+        # Keep the model loaded between requests so later
+        # questions do not repeatedly pay model-load cost.
+        "keep_alive": "30m",
     }
 
 
