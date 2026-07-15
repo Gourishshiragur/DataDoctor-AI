@@ -28,3 +28,5 @@ python-dotenv>=1.0.1,<2.0.0
 
 # Image compatibility
 Pillow>=11.0.0,<13.0.0
+# Testing
+pytest>=8.0.0,<9.0.0

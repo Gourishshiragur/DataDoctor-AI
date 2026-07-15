@@ -1276,6 +1276,22 @@ def run_pipeline(
     )
 
 
+    databricks_execution = None
+    if pipeline_mode == FILE_DRIVEN_MODE:
+        try:
+            from core.databricks_executor import configured, execute_file_pipeline
+            if configured():
+                databricks_execution = execute_file_pipeline(pipeline)
+                if databricks_execution.get("success"):
+                    execution_backend = "databricks-serverless-pyspark"
+        except Exception as databricks_error:
+            databricks_execution = {
+                "attempted": True,
+                "success": False,
+                "reason": str(databricks_error),
+            }
+
+
     profile = pipeline.get(
         "dataset_profile",
         {},
@@ -1327,6 +1343,11 @@ def run_pipeline(
     run_dict[
         "execution_backend"
     ] = execution_backend
+
+
+    if databricks_execution is not None:
+        run_dict["databricks_execution"] = databricks_execution
+        run_dict["lineage"] = databricks_execution.get("tables", {})
 
 
     run_dict[

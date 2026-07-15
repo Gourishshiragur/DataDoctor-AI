@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -61,6 +62,9 @@ if "uploaded_file_name" not in st.session_state:
 
 if "uploaded_file_hash" not in st.session_state:
     st.session_state.uploaded_file_hash = None
+
+if "uploaded_source_local_path" not in st.session_state:
+    st.session_state.uploaded_source_local_path = None
 
 if "dataset_context" not in st.session_state:
     st.session_state.dataset_context = None
@@ -1219,6 +1223,14 @@ if uploaded_file is not None:
         )
         .hexdigest()
     )
+
+    upload_dir = Path(__file__).resolve().parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in uploaded_file.name)
+    local_source_path = upload_dir / f"{current_hash[:12]}_{safe_name}"
+    if not local_source_path.exists():
+        local_source_path.write_bytes(uploaded_file.getvalue())
+    st.session_state["uploaded_source_local_path"] = str(local_source_path)
 
     should_process = (
         current_hash
@@ -2466,6 +2478,11 @@ def create_pipeline_record() -> dict:
             current_profile.get(
                 "file_hash"
             )
+        )
+
+
+        pipeline_record["source_local_path"] = st.session_state.get(
+            "uploaded_source_local_path"
         )
 
 

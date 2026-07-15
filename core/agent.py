@@ -41,14 +41,6 @@ from core.ai_assistant import (
     ask_data_doctor,
 )
 
-# LLM provider: Claude API → Ollama → rule-based fallback (added for multi-tier support)
-from core.llm_provider import (
-    SYSTEM_PROMPT_AGENT,
-    llm_chat,
-    llm_chat_with_tools,
-    llm_status,
-)
-
 from core.rag_memory import (
     Incident,
     MemoryResult,
@@ -1188,8 +1180,9 @@ def diagnose(
     Run the complete agent workflow:
 
     1. Gather pipeline evidence.
-    2. Retrieve similar resolved incidents from RAG memory.
-    3. Try Claude API (tier 1) → Ollama (tier 2) → rule-based fallback (tier 3).
+    2. Retrieve similar resolved incidents.
+    3. Ask free local Ollama for grounded reasoning.
+    4. Fall back safely when Ollama is unavailable.
     """
 
     context = _gather_context(
@@ -1211,28 +1204,6 @@ def diagnose(
             similar,
         )
     )
-
-    # ── Tier 1: Claude API with tool calling ──────────────────────────────
-    active = llm_status()
-    if active["tier"] == 1:
-        try:
-            result = llm_chat_with_tools(
-                prompt=question,
-                system=SYSTEM_PROMPT_AGENT,
-                tools=TOOLS if "TOOLS" in dir() else None,
-                tool_runner=_run_tool if "_run_tool" in dir() else None,
-            )
-            answer = result.get("text", "").strip()
-            if answer:
-                return _parse_diagnosis(
-                    text=answer,
-                    original_code=context["code"],
-                    similar=similar,
-                    tools_used=result.get("tools_used", ["claude-api"]),
-                    source="claude-api",
-                )
-        except Exception:
-            pass  # fall through to Ollama / rule-based below
 
     result = (
         ask_data_doctor(
