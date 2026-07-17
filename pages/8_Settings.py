@@ -4,6 +4,7 @@ DataDoctor AI — Settings & Configuration
 Configure which LLM powers the AI features, view RAG memory status,
 and manage the knowledge base.
 """
+
 import streamlit as st
 
 from core.llm_provider import (
@@ -14,19 +15,83 @@ from core.llm_provider import (
     _ollama_available,
     llm_status,
 )
+
 from core.rag_memory import (
     clear_knowledge,
-    incident_count,
-    knowledge_count,
     memory_stats,
+    is_rag_enabled,
+    set_rag_enabled,
 )
-from core.ui import inject_global_css, sidebar_brand
+
+from core.ui import (
+    inject_global_css,
+    sidebar_brand,
+)
 
 inject_global_css()
 sidebar_brand()
 
 st.title("⚙️ Settings")
-st.caption("Configure AI providers, view RAG memory status, and manage the knowledge base.")
+st.caption(
+    "Configure AI providers, view RAG memory status, and manage the knowledge base."
+)
+## ------------------------------------------------------------------
+# AI Configuration
+# ------------------------------------------------------------------
+
+st.divider()
+st.subheader("AI Configuration")
+
+rag_col, engine_col = st.columns(2)
+
+with rag_col:
+
+    rag_enabled = st.toggle(
+        "Enable RAG",
+        value=is_rag_enabled(),
+        help="Search enterprise knowledge before calling the AI provider.",
+    )
+
+    if rag_enabled != is_rag_enabled():
+        set_rag_enabled(rag_enabled)
+
+with engine_col:
+
+    execution_engine = st.selectbox(
+        "Execution Engine",
+        [
+            "Simulation",
+            "Databricks Free Edition",
+        ],
+        index=0 if st.session_state.get(
+            "execution_engine",
+            "Simulation",
+        ) == "Simulation" else 1,
+    )
+
+    st.session_state["execution_engine"] = execution_engine
+
+
+providers = [
+    "Auto",
+    "Claude",
+    "Ollama",
+    "OpenRouter",
+    "Internal Knowledge",
+]
+
+provider = st.selectbox(
+    "Preferred AI Provider",
+    providers,
+    index=providers.index(
+        st.session_state.get("ai_provider", "Auto")
+    ),
+)
+
+st.session_state["ai_provider"] = provider
+
+
+
 
 # ── LLM Provider status ────────────────────────────────────────────────────
 st.subheader("AI Provider")
@@ -98,11 +163,14 @@ st.divider()
 st.subheader("RAG Memory")
 
 stats = memory_stats()
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Incident memory", f"{stats['incident_count']} incidents", help="Resolved pipeline failures stored for retrieval")
 c2.metric("Knowledge base", f"{stats['knowledge_chunks']} chunks", help="Uploaded docs, schemas, runbooks")
 c3.metric("Embedding model", stats["embedding_model"])
-
+c4.metric(
+    "RAG",
+    "Enabled" if stats["rag_enabled"] else "Disabled",
+)
 st.markdown(
     f"- **Primary backend:** {stats['primary_backend']}\n"
     f"- **Fallback backend:** {stats['fallback_backend']}\n"
