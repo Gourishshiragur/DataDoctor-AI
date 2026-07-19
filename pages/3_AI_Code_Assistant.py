@@ -81,20 +81,31 @@ def display_suggestion(
     )
 
 
-    if suggestion.source == "claude-api":
+    if suggestion.source.startswith("Claude API"):
 
         st.caption(
-            "✅ Generated live using the configured "
-            "external AI provider."
+            f"✨ Generated live using {suggestion.source}."
+        )
+
+    elif suggestion.source.startswith("Groq"):
+
+        st.caption(
+            "⚡ Generated using the free hosted Groq API — works on Streamlit Cloud too."
+        )
+
+    elif suggestion.source == "ollama-local":
+
+        st.caption(
+            "🖥️ Generated using your local Ollama model — free and private."
         )
 
     elif "fallback-after-api" in suggestion.source:
 
         st.caption(
-            "🟢 The external AI provider is unavailable or "
-            "has insufficient credits. DataDoctor AI "
-            f"automatically generated this {normalized_engine.upper()} "
-            "solution using its zero-cost local template engine."
+            "🟢 No AI provider is configured or reachable. "
+            "DataDoctor AI automatically generated this "
+            f"{normalized_engine.upper()} solution using its zero-cost "
+            "local template engine."
         )
 
     else:

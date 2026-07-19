@@ -28,6 +28,7 @@ from core.ai_assistant import (
     ask_data_doctor,
     ollama_health,
 )
+from core.llm_provider import llm_status
 from core.rag_memory import (
     get_rag_context,
     incident_count,
@@ -1050,9 +1051,9 @@ with st.sidebar:
         "Stream live LLM responses",
         value=True,
         help=(
-            "Keeps the existing UI option. Ollama currently "
-            "returns the completed grounded response in one "
-            "request."
+            "Keeps the existing UI option. Claude, Groq, and Ollama "
+            "currently all return the completed grounded response in "
+            "one request rather than token-by-token."
         ),
     )
 
@@ -1067,7 +1068,21 @@ with st.sidebar:
         )
     )
 
-    if installed_models:
+    _active = llm_status()
+
+    if _active["tier"] in (1, 2):
+        # A real remote LLM (Claude or Groq) is what will actually answer —
+        # say so, rather than describing Ollama's state as if it were the
+        # whole story. selected_model still needs a value for the Ollama
+        # call path in ask_data_doctor's own internal fallback, so keep it
+        # populated even though this tier won't reach it.
+        selected_model = (
+            installed_models[0] if installed_models else DEFAULT_OLLAMA_MODEL
+        )
+        st.success(f"✅ {_active['provider']} connected — model: `{_active['model']}`")
+        st.caption(_active["note"])
+
+    elif installed_models:
 
         default_index = 0
 
@@ -1119,8 +1134,8 @@ with st.sidebar:
         )
 
         st.caption(
-            "Ollama was not detected. Built-in enterprise "
-            "troubleshooting remains available without paid "
+            "No Claude, Groq, or Ollama is configured/reachable. Built-in "
+            "enterprise troubleshooting remains available without paid "
             "AI credits."
         )
 
@@ -1509,8 +1524,13 @@ if user_input:
 
 
             st.caption(
-                "Response provider: free local Ollama · "
-                f"Model: {selected_model}"
+                "Response provider: "
+                f"{result.get('provider', 'Ollama')}"
+                + (
+                    f" · Model: {result.get('model')}"
+                    if result.get("model")
+                    else f" · Model: {selected_model}"
+                )
             )
 
 

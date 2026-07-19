@@ -787,6 +787,48 @@ def ask_data_doctor(
         )
     )
 
+    # Tier 0: real Claude API if a key is configured (BYOK session key,
+    # else a deployment secret). No-ops instantly and falls through to
+    # the existing free Ollama/template path when no key is set.
+    try:
+        from core.llm_provider import claude_chat_only
+        claude_result = claude_chat_only(prompt=grounded_prompt)
+        if claude_result:
+            result = {
+                "success": True,
+                "answer": claude_result["text"],
+                "provider": claude_result["provider"],
+                "model": claude_result["model"],
+                "grounded": True,
+                "error": None,
+            }
+            result["rag_used"] = bool(rag_context)
+            result["dataset_context_used"] = bool(dataset_context or analysis_context)
+            result["sources"] = source_names or []
+            return result
+    except Exception:
+        pass
+
+    # Tier 0.5: free hosted Groq, if configured. Reachable from Streamlit
+    # Cloud (unlike Ollama), still zero-cost. No-ops instantly if unset.
+    try:
+        from core.llm_provider import groq_chat_only
+        groq_result = groq_chat_only(prompt=grounded_prompt)
+        if groq_result:
+            result = {
+                "success": True,
+                "answer": groq_result["text"],
+                "provider": groq_result["provider"],
+                "model": groq_result["model"],
+                "grounded": True,
+                "error": None,
+            }
+            result["rag_used"] = bool(rag_context)
+            result["dataset_context_used"] = bool(dataset_context or analysis_context)
+            result["sources"] = source_names or []
+            return result
+    except Exception:
+        pass
 
     result = chat_with_ollama(
         prompt=(
@@ -1683,6 +1725,37 @@ Requirements:
 - Do not include Markdown code fences.
 """.strip()
 
+
+    # Tier 0: real Claude API if a key is configured (BYOK or deployment).
+    # No-ops instantly and falls through unchanged when no key is set.
+    try:
+        from core.llm_provider import claude_chat_only
+        claude_result = claude_chat_only(prompt=generation_prompt, max_tokens=1500)
+        if claude_result:
+            explanation, code = _extract_generated_sections(claude_result["text"])
+            if code:
+                return CodeSuggestion(
+                    code=code,
+                    explanation=explanation,
+                    source=claude_result["provider"],
+                )
+    except Exception:
+        pass
+
+    # Tier 0.5: free hosted Groq, if configured.
+    try:
+        from core.llm_provider import groq_chat_only
+        groq_result = groq_chat_only(prompt=generation_prompt, max_tokens=1500)
+        if groq_result:
+            explanation, code = _extract_generated_sections(groq_result["text"])
+            if code:
+                return CodeSuggestion(
+                    code=code,
+                    explanation=explanation,
+                    source=groq_result["provider"],
+                )
+    except Exception:
+        pass
 
     try:
 

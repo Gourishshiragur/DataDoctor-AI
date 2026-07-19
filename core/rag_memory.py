@@ -32,7 +32,7 @@ No paid API is required.
 """
 
 from __future__ import annotations
-import streamlit as st
+
 import json
 import math
 import re
@@ -75,29 +75,7 @@ EMBEDDING_MODEL = (
     "all-MiniLM-L6-v2"
 )
 
-# ============================================================
-# RAG Configuration
-# ============================================================
 
-DEFAULT_RAG_ENABLED = True
-
-
-def is_rag_enabled() -> bool:
-    """
-    Return whether RAG is enabled.
-    """
-    return st.session_state.get(
-        "rag_enabled",
-        DEFAULT_RAG_ENABLED,
-    )
-
-
-def set_rag_enabled(enabled: bool) -> None:
-    """
-    Enable / Disable RAG.
-    """
-    st.session_state["rag_enabled"] = bool(enabled)
-    
 # ============================================================
 # Utility functions
 # ============================================================
@@ -1829,22 +1807,21 @@ def get_rag_context(
 ) -> Dict[str, Any]:
     """
     Return source-aware context for the AI assistant.
+
+    Output:
+    {
+        "context": "...",
+        "sources": [...],
+        "matches": [...],
+        "retrieved": True
+    }
     """
 
-    # -------------------------------
-    # RAG Disabled
-    # -------------------------------
-    if not is_rag_enabled():
-        return {
-            "context": "",
-            "sources": [],
-            "matches": [],
-            "retrieved": False,
-        }
-
-    matches = retrieve_knowledge(
-        query=query,
-        k=k,
+    matches = (
+        retrieve_knowledge(
+            query=query,
+            k=k,
+        )
     )
 
     if not matches:
@@ -1856,51 +1833,111 @@ def get_rag_context(
         }
 
     context_blocks = []
+
     sources = []
+
     match_payload = []
+
     used_characters = 0
 
-    for position, result in enumerate(matches, start=1):
+    for (
+        position,
+        result,
+    ) in enumerate(
+        matches,
+        start=1,
+    ):
+        document = (
+            result.document
+        )
 
-        document = result.document
-
-        if document.source_name not in sources:
-            sources.append(document.source_name)
+        if (
+            document.source_name
+            not in sources
+        ):
+            sources.append(
+                document
+                .source_name
+            )
 
         block = (
-            f"[Source {position}: {document.source_name}]\n"
+            f"[Source {position}: "
+            f"{document.source_name}]\n"
             f"{document.text}"
         )
 
         remaining = (
-            max(0, int(max_characters))
+            max(
+                0,
+                int(
+                    max_characters
+                ),
+            )
             - used_characters
         )
 
         if remaining <= 0:
             break
 
-        if len(block) > remaining:
-            block = block[:remaining]
+        if (
+            len(
+                block
+            )
+            > remaining
+        ):
+            block = (
+                block[
+                    :remaining
+                ]
+            )
 
-        context_blocks.append(block)
-        used_characters += len(block)
+        context_blocks.append(
+            block
+        )
+
+        used_characters += (
+            len(
+                block
+            )
+        )
 
         match_payload.append(
             {
-                "source": document.source_name,
-                "content_type": document.content_type,
-                "chunk_index": document.chunk_index,
-                "score": result.similarity_score,
-                "backend": result.source,
+                "source": (
+                    document
+                    .source_name
+                ),
+                "content_type": (
+                    document
+                    .content_type
+                ),
+                "chunk_index": (
+                    document
+                    .chunk_index
+                ),
+                "score": (
+                    result
+                    .similarity_score
+                ),
+                "backend": (
+                    result.source
+                ),
             }
         )
 
     return {
-        "context": "\n\n".join(context_blocks),
+        "context": (
+            "\n\n".join(
+                context_blocks
+            )
+        ),
         "sources": sources,
-        "matches": match_payload,
-        "retrieved": bool(context_blocks),
+        "matches": (
+            match_payload
+        ),
+        "retrieved": bool(
+            context_blocks
+        ),
     }
 
 
@@ -2079,5 +2116,4 @@ def memory_stats() -> Dict[str, Any]:
         "paid_api_required": (
             False
         ),
-         "rag_enabled": is_rag_enabled(), 
     }

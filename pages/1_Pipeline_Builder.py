@@ -22,13 +22,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from core import store
 from core.models import Pipeline, Step, new_id
 from core.pipeline_engine import run_pipeline
 from core.templates import get_templates
-from core.ui import inject_global_css, sidebar_brand
+from core.ui import inject_global_css, sidebar_brand, execution_backend_badge, render_ai_provider_badge
+from core.reporting import (
+    medallion_funnel,
+    funnel_chart,
+    quality_gauge,
+    kpi_breakdown_chart,
+    repair_timeline,
+    generate_stakeholder_narrative,
+    data_flow_sankey,
+    architecture_summary,
+)
 
 
 # =========================================================
@@ -1203,6 +1214,46 @@ st.caption(
     "generate Bronze → Silver → Gold pipeline steps."
 )
 
+demo_col1, demo_col2 = st.columns([2, 1])
+with demo_col1:
+    st.caption("Don't have a file handy? Generate a free synthetic sample dataset and run the exact same flow end-to-end.")
+with demo_col2:
+    if st.button("🎲 Try free demo data", use_container_width=True):
+        import random
+        rng = random.Random(42)
+        regions = ["North", "South", "East", "West"]
+        products = ["Widget A", "Widget B", "Gadget X", "Gadget Y", "Component Z"]
+        demo_rows = []
+        for i in range(500):
+            qty = rng.randint(1, 50)
+            unit_price = round(rng.uniform(10, 500), 2)
+            sales = round(qty * unit_price, 2)
+            cost = round(sales * rng.uniform(0.4, 0.75), 2)
+            demo_rows.append({
+                "order_id": f"ORD-{1000 + i}",
+                "region": rng.choice(regions),
+                "product": rng.choice(products),
+                "quantity": qty,
+                "unit_price": unit_price,
+                "total_sales": sales,
+                "total_cost": cost,
+                "profit": round(sales - cost, 2),
+            })
+        # Introduce a few realistic quality issues so Data Quality / repair
+        # sections have something genuine to report on, never fabricated.
+        for _ in range(15):
+            demo_rows.append(dict(demo_rows[rng.randrange(len(demo_rows))]))  # duplicate rows
+        demo_df = pd.DataFrame(demo_rows)
+        demo_csv_bytes = demo_df.to_csv(index=False).encode("utf-8")
+        st.session_state["demo_dataset_bytes"] = demo_csv_bytes
+        st.session_state["demo_dataset_name"] = "free_demo_sales_data.csv"
+        st.session_state.pop("uploaded_file_hash", None)
+        st.rerun()
+    if st.session_state.get("demo_dataset_bytes") and st.button("✖️ Clear demo data", use_container_width=True):
+        st.session_state.pop("demo_dataset_bytes", None)
+        st.session_state.pop("demo_dataset_name", None)
+        st.rerun()
+
 uploaded_file = st.file_uploader(
     "Upload CSV, Excel, JSON, or Parquet",
     type=[
@@ -1213,6 +1264,31 @@ uploaded_file = st.file_uploader(
         "parquet",
     ],
 )
+
+if uploaded_file is None and st.session_state.get("demo_dataset_bytes"):
+
+    class _DemoUploadedFile:
+        """Duck-types Streamlit's UploadedFile so the existing real-data
+        pipeline below runs completely unmodified against demo bytes."""
+
+        def __init__(self, data: bytes, name: str):
+            self._data = data
+            self.name = name
+
+        def getvalue(self) -> bytes:
+            return self._data
+
+        def read(self, *args, **kwargs) -> bytes:
+            return self._data
+
+        def seek(self, *args, **kwargs) -> None:
+            pass
+
+    uploaded_file = _DemoUploadedFile(
+        st.session_state["demo_dataset_bytes"],
+        st.session_state["demo_dataset_name"],
+    )
+    st.info("🎲 Using free synthetic demo data — 500 sample sales rows with a few intentional duplicates so quality checks and repair have something real to find.")
 
 
 if uploaded_file is not None:
@@ -2764,6 +2840,91 @@ if last_run:
             use_container_width=True,
             hide_index=True,
         )
+
+    st.markdown(
+        execution_backend_badge(last_run.get("execution_backend", "local-orchestration-simulation")),
+        unsafe_allow_html=True,
+    )
+
+    # =====================================================
+    # STAKEHOLDER REPORT — embedded graphs + AI narrative
+    # =====================================================
+    st.divider()
+    st.subheader("📋 Stakeholder Report")
+
+    _profile_for_report = (
+        st.session_state.get("uploaded_dataset_profile")
+        or st.session_state.get("data_profile")
+        or {}
+    )
+    _pipelines_by_id = {p["id"]: p for p in store.load_pipelines()}
+    _pipeline_for_report = _pipelines_by_id.get(last_run.get("pipeline_id"), {})
+    _pipeline_steps_for_report = _pipeline_for_report.get("steps", [])
+    _timeline = repair_timeline(last_run)
+
+    if not _profile_for_report:
+        st.info("Upload and run a file-driven pipeline above to generate a stakeholder report for it.")
+    else:
+        report_graph_col, report_kpi_col = st.columns([3, 2])
+
+        with report_graph_col:
+            funnel_rows = medallion_funnel(step_runs, _pipeline_steps_for_report)
+            if any(r["rows_processed"] for r in funnel_rows):
+                st.plotly_chart(funnel_chart(funnel_rows), use_container_width=True)
+            st.plotly_chart(
+                data_flow_sankey(_profile_for_report, funnel_rows),
+                use_container_width=True,
+            )
+            kpi_chart = kpi_breakdown_chart(_profile_for_report.get("business_metrics", {}))
+            if kpi_chart is not None:
+                st.plotly_chart(kpi_chart, use_container_width=True)
+
+        with report_kpi_col:
+            st.plotly_chart(
+                quality_gauge(_profile_for_report.get("data_quality_score", 0)),
+                use_container_width=True,
+            )
+            _metrics = _profile_for_report.get("business_metrics", {}) or {}
+            if "total_sales" in _metrics:
+                st.metric("Total Sales", f"{_metrics['total_sales']:,.2f}")
+            if "total_profit" in _metrics:
+                st.metric("Total Profit", f"{_metrics['total_profit']:,.2f}")
+            if "profit_rate_percentage" in _metrics:
+                st.metric("Profit Rate", f"{_metrics['profit_rate_percentage']:.1f}%")
+
+        if _timeline:
+            with st.expander(f"🔧 Self-healing timeline — {len(_timeline)} step(s) recovered", expanded=False):
+                for step in _timeline:
+                    st.markdown(
+                        f"- Step `{step['step_id']}` → **{step['status']}** "
+                        f"after {step['retry_count']} retry(ies)"
+                        + (f" — error: {step['error_message']}" if step.get("error_message") else "")
+                    )
+                st.caption("Open AI Agent Console for a full AI-diagnosed root cause and fix on any failed step.")
+        else:
+            st.caption("✅ No steps required repair on this run.")
+
+        st.markdown("**Executive summary (embedded answer for stakeholders)**")
+        render_ai_provider_badge()
+        with st.spinner("Writing executive summary from verified run data..."):
+            narrative = generate_stakeholder_narrative(
+                pipeline_name=last_run.get("pipeline_name", "pipeline"),
+                profile=_profile_for_report,
+                run=last_run,
+                timeline=_timeline,
+            )
+        st.info(narrative["text"])
+        st.caption(f"Written by: {narrative['provider']} · grounded only in the metrics shown above, nothing invented.")
+
+        with st.expander("🏗️ Architecture — what's powering this, free vs paid", expanded=False):
+            for row in architecture_summary():
+                st.markdown(f"- **{row['layer']}**: {row['tech']} — _{row['cost']}_")
+            st.caption(
+                "Free tier = Databricks Free Edition serverless PySpark (or local pandas simulation), "
+                "ChromaDB + local embeddings for RAG, and Ollama/rule-based for AI text. "
+                "Paid tier only activates when a Claude key (yours or the deployment's) is configured — "
+                "same pages, same buttons, no separate mode to switch."
+            )
 
 
 # =========================================================

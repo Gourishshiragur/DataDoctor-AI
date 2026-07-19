@@ -42,6 +42,34 @@ def _request(method: str, path: str, **kwargs):
     return response
 
 
+def test_connection() -> Dict[str, Any]:
+    """
+    Read-only auth check: confirms DATABRICKS_HOST/DATABRICKS_TOKEN can
+    actually reach the workspace, without uploading a file, submitting a
+    job, or touching Unity Catalog. Safe to call anytime — zero cost,
+    zero side effects. Works identically on Free Edition and a paid
+    workspace; there's no separate code path for either, since both
+    speak the same Databricks REST API.
+    """
+    if not configured():
+        return {"success": False, "reason": "DATABRICKS_HOST / DATABRICKS_TOKEN are not set."}
+    try:
+        response = _request("GET", "/api/2.0/preview/scim/v2/Me")
+        data = response.json()
+        return {
+            "success": True,
+            "user": data.get("userName") or data.get("displayName") or "authenticated",
+            "host": _cfg("DATABRICKS_HOST"),
+        }
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        return {"success": False, "reason": f"Authentication failed (HTTP {status}). Check DATABRICKS_HOST and DATABRICKS_TOKEN."}
+    except requests.exceptions.RequestException as exc:
+        return {"success": False, "reason": f"Could not reach the workspace: {exc}"}
+    except Exception as exc:
+        return {"success": False, "reason": str(exc)}
+
+
 def execute_file_pipeline(pipeline: Dict[str, Any]) -> Dict[str, Any]:
     """Execute uploaded data through real Databricks PySpark when configured."""
     if not configured():

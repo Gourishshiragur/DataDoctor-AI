@@ -31,9 +31,11 @@ import requests
 # Constants
 # ──────────────────────────────────────────────────────────────
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-sonnet-4-6"  # default; overridden by ANTHROPIC_MODEL secret/env if set
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "llama3"
+DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 REQUEST_TIMEOUT = 30
 STREAM_TIMEOUT = 60
 
@@ -41,8 +43,215 @@ STREAM_TIMEOUT = 60
 # ──────────────────────────────────────────────────────────────
 # API key helpers
 # ──────────────────────────────────────────────────────────────
+BYOK_SESSION_KEY = "byok_anthropic_api_key"
+
+
+def set_session_api_key(key: str) -> None:
+    """
+    Store a user-supplied Anthropic key for THIS browser session only.
+    Never written to disk, never saved to store.py, never logged.
+    Cleared automatically when the session ends.
+    """
+    try:
+        import streamlit as st
+        st.session_state[BYOK_SESSION_KEY] = (key or "").strip()
+    except Exception:
+        pass
+
+
+def clear_session_api_key() -> None:
+    try:
+        import streamlit as st
+        st.session_state.pop(BYOK_SESSION_KEY, None)
+    except Exception:
+        pass
+
+
+def session_api_key_active() -> bool:
+    try:
+        import streamlit as st
+        return bool(st.session_state.get(BYOK_SESSION_KEY))
+    except Exception:
+        return False
+
+
+def _session_claude_api_key() -> Optional[str]:
+    try:
+        import streamlit as st
+        key = st.session_state.get(BYOK_SESSION_KEY, "")
+        return key or None
+    except Exception:
+        return None
+
+
+def _claude_model() -> str:
+    """Resolve the Claude model to use — ANTHROPIC_MODEL secret/env if set, else the built-in default."""
+    try:
+        import streamlit as st
+        value = st.secrets.get("ANTHROPIC_MODEL", "")
+        if value:
+            return value
+    except Exception:
+        pass
+    return os.environ.get("ANTHROPIC_MODEL") or CLAUDE_MODEL
+
+
+# ──────────────────────────────────────────────────────────────
+# Tier 2: Groq (free hosted, OpenAI-compatible) — reachable from
+# Streamlit Cloud, unlike Ollama which only works when the app
+# itself is running on the same machine as the Ollama server.
+# ──────────────────────────────────────────────────────────────
+_PLACEHOLDER_MARKERS = ("paste-", "your-key", "your-api-key", "xxxx", "changeme")
+
+
+def _groq_api_key() -> Optional[str]:
+    """
+    Read FREE_LLM_API_KEY (matches secrets.toml), with GROQ_API_KEY as an
+    alias. Treats obvious unfilled placeholders (e.g. "paste-groq-key-here")
+    as not configured, so a template secrets file doesn't silently break.
+    Returns None if a forced provider mode excludes Groq.
+    """
+    if _provider_mode() not in ("auto", "groq"):
+        return None
+    key = None
+    try:
+        import streamlit as st
+        key = st.secrets.get("FREE_LLM_API_KEY", "") or st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        pass
+    if not key:
+        key = os.environ.get("FREE_LLM_API_KEY") or os.environ.get("GROQ_API_KEY")
+    if not key:
+        return None
+    key = key.strip()
+    if not key or any(marker in key.lower() for marker in _PLACEHOLDER_MARKERS):
+        return None
+    return key
+
+
+def _groq_base_url() -> str:
+    try:
+        import streamlit as st
+        return st.secrets.get("FREE_LLM_BASE_URL", "") or DEFAULT_GROQ_BASE_URL
+    except Exception:
+        return os.environ.get("FREE_LLM_BASE_URL") or DEFAULT_GROQ_BASE_URL
+
+
+def _groq_model() -> str:
+    try:
+        import streamlit as st
+        return st.secrets.get("FREE_LLM_MODEL", "") or DEFAULT_GROQ_MODEL
+    except Exception:
+        return os.environ.get("FREE_LLM_MODEL") or DEFAULT_GROQ_MODEL
+
+
+def _groq_chat(system: str, messages: List[Dict], max_tokens: int = 1200) -> str:
+    """OpenAI-compatible chat completion call against Groq's free API."""
+    api_key = _groq_api_key()
+    if not api_key:
+        raise RuntimeError("No Groq/free-tier API key configured")
+    resp = requests.post(
+        f"{_groq_base_url()}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": _groq_model(),
+            "messages": [{"role": "system", "content": system}] + list(messages),
+            "max_tokens": max_tokens,
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+
+
+def groq_chat_only(
+    prompt: str,
+    system: str = "You are a helpful, precise data engineering assistant.",
+    max_tokens: int = 1200,
+) -> Optional[Dict[str, Any]]:
+    """
+    Try the free hosted Groq tier only. Returns None instantly — no
+    network call — when no real key is configured, so callers can chain
+    it safely between claude_chat_only and their existing Ollama/template
+    fallback with zero behavior change when it's not set up.
+    """
+    if not _groq_api_key():
+        return None
+    try:
+        text = _groq_chat(system, [{"role": "user", "content": prompt}], max_tokens)
+        if not text:
+            return None
+        return {"text": text, "provider": "Groq (free hosted)", "model": _groq_model()}
+    except Exception:
+        return None
+
+
+PROVIDER_MODE_OVERRIDE_KEY = "provider_mode_session_override"
+VALID_PROVIDER_MODES = ("auto", "claude", "groq", "ollama", "rule_based")
+
+
+def set_session_provider_mode(mode: str) -> None:
+    """Force a specific tier for THIS browser session only — lets you
+    verify Groq/Ollama actually work even while a Claude key is present,
+    without touching secrets.toml or redeploying."""
+    try:
+        import streamlit as st
+        mode = (mode or "auto").strip().lower()
+        if mode == "auto":
+            st.session_state.pop(PROVIDER_MODE_OVERRIDE_KEY, None)
+        else:
+            st.session_state[PROVIDER_MODE_OVERRIDE_KEY] = mode
+    except Exception:
+        pass
+
+
+def _provider_mode() -> str:
+    """
+    Resolve which tier should be used, in priority order:
+    1. A session override set via Settings (this browser session only).
+    2. AI_PROVIDER_MODE in secrets/env (deployment-wide default).
+    3. "auto" — best available tier, Claude > Groq > Ollama > rule-based.
+    Invalid/unrecognized values fall back to "auto" rather than silently
+    disabling the app.
+    """
+    try:
+        import streamlit as st
+        override = st.session_state.get(PROVIDER_MODE_OVERRIDE_KEY, "")
+        if override:
+            return override
+    except Exception:
+        pass
+    mode = ""
+    try:
+        import streamlit as st
+        mode = st.secrets.get("AI_PROVIDER_MODE", "")
+    except Exception:
+        pass
+    if not mode:
+        mode = os.environ.get("AI_PROVIDER_MODE", "")
+    mode = (mode or "auto").strip().lower()
+    return mode if mode in VALID_PROVIDER_MODES else "auto"
+
+
 def _claude_api_key() -> Optional[str]:
-    """Check Streamlit secrets first, then environment variable."""
+    """
+    Resolve the Anthropic key to use, in priority order:
+    1. BYOK — a key the user pasted in Settings for this session only.
+    2. Deployment secret (Streamlit secrets.toml on the host running the app).
+    3. Environment variable (local development).
+    Returns None if AI_PROVIDER_MODE (or a session override) has forced a
+    different tier, even when a real key is present — that's what makes
+    "force Groq" or "force Ollama" actually testable.
+    """
+    if _provider_mode() not in ("auto", "claude"):
+        return None
+    session_key = _session_claude_api_key()
+    if session_key:
+        return session_key
     # Streamlit secrets (set in share.streamlit.io → Settings → Secrets)
     try:
         import streamlit as st
@@ -58,9 +267,17 @@ def _claude_api_key() -> Optional[str]:
 def _ollama_url() -> str:
     try:
         import streamlit as st
-        return st.secrets.get("OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        return (
+            st.secrets.get("OLLAMA_BASE_URL", "")
+            or st.secrets.get("OLLAMA_URL", "")
+            or DEFAULT_OLLAMA_URL
+        )
     except Exception:
-        return os.environ.get("OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        return (
+            os.environ.get("OLLAMA_BASE_URL")
+            or os.environ.get("OLLAMA_URL")
+            or DEFAULT_OLLAMA_URL
+        )
 
 
 def _ollama_model() -> str:
@@ -75,6 +292,8 @@ def _ollama_model() -> str:
 # Tier detection
 # ──────────────────────────────────────────────────────────────
 def _ollama_available() -> bool:
+    if _provider_mode() not in ("auto", "ollama"):
+        return False
     try:
         r = requests.get(f"{_ollama_url()}/api/tags", timeout=2)
         return r.status_code == 200
@@ -87,30 +306,53 @@ def llm_status() -> Dict[str, Any]:
     Return which LLM tier is active and why.
     Call this to show users what's powering the AI features.
     """
+    mode = _provider_mode()
+    forced = mode if mode != "auto" else None
     if _claude_api_key():
+        byok = session_api_key_active()
         return {
             "tier": 1,
-            "provider": "Claude API",
-            "model": CLAUDE_MODEL,
+            "provider": "Claude API (your key)" if byok else "Claude API",
+            "model": _claude_model(),
             "available": True,
-            "note": "Anthropic Claude API — best quality, works on Streamlit Cloud.",
+            "byok": byok,
+            "forced_mode": forced,
+            "note": (
+                "Using the Anthropic key you pasted in Settings for this session only."
+                if byok
+                else "Anthropic Claude API — best quality, works on Streamlit Cloud."
+            ),
+        }
+    if _groq_api_key():
+        return {
+            "tier": 2,
+            "provider": "Groq (free hosted)",
+            "model": _groq_model(),
+            "available": True,
+            "byok": False,
+            "forced_mode": forced,
+            "note": "Free hosted Groq API — works from Streamlit Cloud, no local server needed.",
         }
     if _ollama_available():
         return {
-            "tier": 2,
+            "tier": 3,
             "provider": "Ollama (local)",
             "model": _ollama_model(),
             "available": True,
+            "byok": False,
+            "forced_mode": forced,
             "note": f"Local Ollama at {_ollama_url()} — free, private, offline-capable.",
         }
     return {
-        "tier": 3,
+        "tier": 4,
         "provider": "Rule-based fallback",
         "model": None,
         "available": True,
+        "forced_mode": forced,
+        "byok": False,
         "note": (
             "No LLM configured. Using deterministic rule-based diagnosis. "
-            "Add ANTHROPIC_API_KEY in Streamlit → Settings → Secrets for live AI."
+            "Add ANTHROPIC_API_KEY, or a free FREE_LLM_API_KEY (Groq), in Streamlit → Settings → Secrets for live AI."
         ),
     }
 
@@ -130,7 +372,7 @@ def _claude_chat(
         raise RuntimeError("No Claude API key")
 
     payload: Dict[str, Any] = {
-        "model": CLAUDE_MODEL,
+        "model": _claude_model(),
         "max_tokens": max_tokens,
         "system": system,
         "messages": messages,
@@ -170,7 +412,7 @@ def _claude_stream(
             "content-type": "application/json",
         },
         json={
-            "model": CLAUDE_MODEL,
+            "model": _claude_model(),
             "max_tokens": max_tokens,
             "system": system,
             "messages": messages,
@@ -388,6 +630,36 @@ SYSTEM_PROMPT_CODE = (
 )
 
 
+def claude_chat_only(
+    prompt: str,
+    system: str = SYSTEM_PROMPT_CHAT,
+    max_tokens: int = 1200,
+) -> Optional[Dict[str, Any]]:
+    """
+    Try Claude API ONLY (BYOK session key, else deployment secret).
+    Returns None immediately — no network call — if no key is configured,
+    so every caller's existing free-tier (Ollama / rule-based) path is
+    completely unaffected when Claude isn't set up. This is what lets
+    Code Assistant, Chat, and AI Agent repair diagnosis pick up a paid
+    key automatically without changing their own fallback logic.
+    """
+    if not _claude_api_key():
+        return None
+    try:
+        data = _claude_chat(system, [{"role": "user", "content": prompt}], max_tokens)
+        text = _claude_text(data)
+        if not text:
+            return None
+        return {
+            "text": text,
+            "provider": "Claude API (your key)" if session_api_key_active() else "Claude API",
+            "model": _claude_model(),
+            "byok": session_api_key_active(),
+        }
+    except Exception:
+        return None
+
+
 def llm_chat(
     prompt: str,
     system: str = SYSTEM_PROMPT_CHAT,
@@ -420,24 +692,38 @@ def llm_chat(
         except Exception as e:
             pass  # fall through to tier 2
 
-    # Tier 2: Ollama
+    # Tier 2: Groq (free hosted)
+    if _groq_api_key():
+        try:
+            text = _groq_chat(system, messages, max_tokens)
+            if text:
+                return {
+                    "text": text,
+                    "provider": "Groq (free hosted)",
+                    "tier": 2,
+                    "error": None,
+                }
+        except Exception:
+            pass  # fall through to tier 3
+
+    # Tier 3: Ollama
     if _ollama_available():
         try:
             text = _ollama_chat(system, messages, max_tokens)
             return {
                 "text": text,
                 "provider": "Ollama (local)",
-                "tier": 2,
+                "tier": 3,
                 "error": None,
             }
         except Exception as e:
             pass
 
-    # Tier 3: Rule-based
+    # Tier 4: Rule-based
     return {
         "text": _rule_answer(prompt),
         "provider": "Rule-based fallback",
-        "tier": 3,
+        "tier": 4,
         "error": None,
     }
 

@@ -779,6 +779,156 @@ def status_badge(status: str) -> str:
 # SIDEBAR BRAND
 # =========================================================
 
+def execution_backend_meta(backend: str) -> dict:
+    """
+    Map an internal execution_backend value to a truthful, user-facing
+    label/color/description. This is the single source of truth used by
+    every page so 'Simulation' vs 'Databricks' is never ambiguous.
+    """
+    normalized = str(backend or "").strip()
+    table = {
+        "databricks-serverless-pyspark": {
+            "label": "Databricks (real PySpark)",
+            "color": "#22C55E",
+            "icon": "🟢",
+            "note": "Executed on a real Databricks serverless job — Delta tables were written in your workspace.",
+        },
+        "verified-local-data": {
+            "label": "Verified — your uploaded data",
+            "color": "#3B82F6",
+            "icon": "🔵",
+            "note": "Ran locally against the file you uploaded (pandas). Real rows, real profiling — not a Spark cluster.",
+        },
+        "local-orchestration-simulation": {
+            "label": "Simulation",
+            "color": "#F59E0B",
+            "icon": "🟠",
+            "note": "No uploaded file / no Databricks configured — orchestration, dependencies, and retries are simulated for demo purposes.",
+        },
+    }
+    return table.get(
+        normalized,
+        {
+            "label": normalized or "Unknown",
+            "color": "#64748B",
+            "icon": "⚪",
+            "note": "Execution backend not recorded for this run.",
+        },
+    )
+
+
+def execution_backend_badge(backend: str) -> str:
+    """
+    Return a safe colored HTML badge that honestly states whether a run was
+    Simulation, Verified-local, or real Databricks — no page should claim
+    'PySpark Engine' without this label next to it.
+    """
+    meta = execution_backend_meta(backend)
+    safe_label = html.escape(meta["label"])
+    return (
+        '<span class="ddai-badge" '
+        f'style="background:{meta["color"]};" '
+        f'title="{html.escape(meta["note"])}">'
+        f'{meta["icon"]} {safe_label}'
+        "</span>"
+    )
+
+
+def render_execution_backend(backend: str):
+    """Streamlit-render the execution backend badge plus its explanation."""
+    meta = execution_backend_meta(backend)
+    st.markdown(execution_backend_badge(backend), unsafe_allow_html=True)
+    st.caption(meta["note"])
+
+
+def ai_provider_status() -> dict:
+    """
+    Wrap core.llm_provider.llm_status() so every page shows the SAME
+    provider truth (Claude API / Ollama / Internal rule-based engine).
+    Never fabricates a provider (e.g. Gemini) that isn't actually wired up.
+    """
+    try:
+        from core.llm_provider import llm_status
+        status = llm_status()
+    except Exception as exc:
+        status = {
+            "tier": 3,
+            "provider": "Internal rule-based engine",
+            "model": None,
+            "available": True,
+            "note": f"Provider check failed ({exc}); using deterministic fallback.",
+        }
+    tier_colors = {1: "#7C3AED", 2: "#0EA5E9", 3: "#64748B"}
+    tier_icons = {1: "✨", 2: "🖥️", 3: "🛠️"}
+    status["color"] = tier_colors.get(status.get("tier"), "#64748B")
+    status["icon"] = tier_icons.get(status.get("tier"), "🛠️")
+    # "Internal rule-based engine" is what tier 3 actually is — rename for clarity.
+    if status.get("tier") == 3:
+        status["provider"] = "Internal rule-based engine"
+    return status
+
+
+def render_ai_provider_badge(inline: bool = True):
+    """
+    Render the 'which engine answered' indicator. Call this near the top of
+    any AI-powered page (Chat, AI Agent, AI Code Assistant) or in the
+    sidebar so it's always visible, never buried in Settings alone.
+    """
+    status = ai_provider_status()
+    model_suffix = f" · {status['model']}" if status.get("model") else ""
+    badge_html = (
+        '<span class="ddai-badge" '
+        f'style="background:{status["color"]};" '
+        f'title="{html.escape(status.get("note", ""))}">'
+        f'{status["icon"]} {html.escape(status["provider"])}{html.escape(model_suffix)}'
+        "</span>"
+    )
+    if inline:
+        st.markdown(f"**AI Provider:** {badge_html}", unsafe_allow_html=True)
+    else:
+        st.markdown(badge_html, unsafe_allow_html=True)
+
+
+def render_rag_transparency(
+    source_names=None,
+    dataset_used: bool = False,
+    logs_used: bool = False,
+    retrieved: bool = False,
+):
+    """
+    Make it obvious whether an answer came from uploaded files, project
+    documents, logs, or just the general LLM with no retrieval at all.
+    Pass whatever the calling page already knows — this only renders it
+    consistently.
+    """
+    source_names = source_names or []
+    doc_sources = [s for s in source_names if s != "DataDoctor incident memory"]
+    incident_used = "DataDoctor incident memory" in source_names
+
+    chips = []
+    if dataset_used:
+        chips.append(("📊", "Uploaded dataset", "#3B82F6"))
+    if doc_sources:
+        chips.append(("📄", f"Project docs ({len(doc_sources)})", "#22C55E"))
+    if incident_used:
+        chips.append(("🧾", "Past incident memory", "#F59E0B"))
+    if logs_used:
+        chips.append(("🗒️", "Pipeline logs", "#EAB308"))
+
+    if not chips and not retrieved:
+        chips.append(("🧠", "General LLM knowledge — no retrieval used", "#64748B"))
+
+    badges = " ".join(
+        '<span class="ddai-badge" style="background:{color};">{icon} {label}</span>'.format(
+            color=color, icon=icon, label=html.escape(label)
+        )
+        for icon, label, color in chips
+    )
+    st.markdown(f"**Grounded on:** {badges}", unsafe_allow_html=True)
+    if doc_sources:
+        st.caption("Sources: " + ", ".join(html.escape(s) for s in doc_sources))
+
+
 def sidebar_brand():
     """
     Display enterprise DataDoctor AI branding.
@@ -809,5 +959,20 @@ Operations console available
         brand_html,
         unsafe_allow_html=True,
     )
+
+    try:
+        status = ai_provider_status()
+        model_suffix = f" · {status['model']}" if status.get("model") else ""
+        st.sidebar.markdown(
+            '<div style="margin:-0.4rem 0 0.8rem 0;">'
+            '<span class="ddai-badge" '
+            f'style="background:{status["color"]};" '
+            f'title="{html.escape(status.get("note", ""))}">'
+            f'{status["icon"]} {html.escape(status["provider"])}{html.escape(model_suffix)}'
+            "</span></div>",
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
 
     st.sidebar.divider()
