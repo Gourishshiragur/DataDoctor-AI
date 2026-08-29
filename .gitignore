@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+storage/*.duckdb
+database/*.db
+database/app_settings.json
+.streamlit/secrets.toml

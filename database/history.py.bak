@@ -1,0 +1,438 @@
+"""
+database/history.py
+--------------------
+Lightweight append-only history store for:
+- pipeline run events (used by Monitor + Replay pages)
+- lineage events (used by lineage graph on Dashboard/PipelineStudio)
+- quality check results (used by Monitor)
+- repair actions taken by the self-healing engine
+
+Backed by SQLite (database/history.db) so it works with zero setup and survives restarts.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Optional
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = ROOT_DIR / "database" / "history.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    dataset TEXT,
+    started_at REAL,
+    finished_at REAL,
+    status TEXT,
+    summary TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    ts REAL,
+    stage TEXT,
+    level TEXT,
+    message TEXT
+);
+CREATE TABLE IF NOT EXISTS lineage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    ts REAL,
+    source_layer TEXT,
+    source_table TEXT,
+    target_layer TEXT,
+    target_table TEXT,
+    transform TEXT
+);
+CREATE TABLE IF NOT EXISTS quality_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    ts REAL,
+    check_name TEXT,
+    layer TEXT,
+    passed INTEGER,
+    details TEXT
+);
+CREATE TABLE IF NOT EXISTS repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    ts REAL,
+    column_name TEXT,
+    issue TEXT,
+    action TEXT,
+    rows_affected INTEGER,
+    source TEXT
+);
+CREATE TABLE IF NOT EXISTS backend_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    ts REAL,
+    layer TEXT,
+    table_name TEXT,
+    requested_backend TEXT,
+    actual_backend TEXT,
+    fallback INTEGER,
+    reason TEXT
+);
+CREATE TABLE IF NOT EXISTS datasets (
+    dataset_id TEXT PRIMARY KEY,
+    name TEXT,
+    source TEXT,
+    original_filename TEXT,
+    file_path TEXT,
+    row_count INTEGER,
+    byte_size INTEGER,
+    checksum TEXT,
+    registered_at REAL
+);
+CREATE TABLE IF NOT EXISTS notebook_versions (
+    version_id TEXT PRIMARY KEY,
+    dataset_id TEXT,
+    source_type TEXT,
+    content TEXT,
+    workspace_path TEXT,
+    mode TEXT,
+    deployed_at REAL,
+    deployed_by TEXT
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL,
+    actor TEXT,
+    action TEXT,
+    target TEXT,
+    details TEXT
+);
+"""
+
+
+def _conn():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(DB_PATH))
+    con.executescript(SCHEMA)
+    return con
+
+
+def new_run(dataset: str) -> str:
+    run_id = str(uuid.uuid4())[:8]
+    con = _conn()
+    con.execute(
+        "INSERT INTO runs (run_id, dataset, started_at, status, summary) VALUES (?,?,?,?,?)",
+        (run_id, dataset, time.time(), "running", ""),
+    )
+    con.commit()
+    con.close()
+    return run_id
+
+
+def finish_run(run_id: str, status: str, summary: dict):
+    con = _conn()
+    con.execute(
+        "UPDATE runs SET finished_at=?, status=?, summary=? WHERE run_id=?",
+        (time.time(), status, json.dumps(summary), run_id),
+    )
+    con.commit()
+    con.close()
+
+
+def log_event(run_id: str, stage: str, message: str, level: str = "info"):
+    con = _conn()
+    con.execute(
+        "INSERT INTO events (run_id, ts, stage, level, message) VALUES (?,?,?,?,?)",
+        (run_id, time.time(), stage, level, message),
+    )
+    con.commit()
+    con.close()
+
+
+def log_lineage(run_id: str, source_layer: str, source_table: str, target_layer: str, target_table: str, transform: str):
+    con = _conn()
+    con.execute(
+        "INSERT INTO lineage (run_id, ts, source_layer, source_table, target_layer, target_table, transform) VALUES (?,?,?,?,?,?,?)",
+        (run_id, time.time(), source_layer, source_table, target_layer, target_table, transform),
+    )
+    con.commit()
+    con.close()
+
+
+def log_quality_check(run_id: str, check_name: str, layer: str, passed: bool, details: dict):
+    con = _conn()
+    con.execute(
+        "INSERT INTO quality_checks (run_id, ts, check_name, layer, passed, details) VALUES (?,?,?,?,?,?)",
+        (run_id, time.time(), check_name, layer, int(passed), json.dumps(details)),
+    )
+    con.commit()
+    con.close()
+
+
+def log_repair(run_id: str, column_name: str, issue: str, action: str, rows_affected: int, source: str):
+    con = _conn()
+    con.execute(
+        "INSERT INTO repairs (run_id, ts, column_name, issue, action, rows_affected, source) VALUES (?,?,?,?,?,?,?)",
+        (run_id, time.time(), column_name, issue, action, rows_affected, source),
+    )
+    con.commit()
+    con.close()
+
+
+def log_backend_event(run_id: str, layer: str, table_name: str, requested_backend: str,
+                       actual_backend: str, fallback: bool, reason: str = ""):
+    con = _conn()
+    con.execute(
+        "INSERT INTO backend_events (run_id, ts, layer, table_name, requested_backend, "
+        "actual_backend, fallback, reason) VALUES (?,?,?,?,?,?,?,?)",
+        (run_id, time.time(), layer, table_name, requested_backend, actual_backend, int(fallback), reason),
+    )
+    con.commit()
+    con.close()
+
+
+def get_backend_events(run_id: Optional[str] = None, limit: int = 200):
+    con = _conn()
+    if run_id:
+        rows = con.execute(
+            "SELECT run_id, ts, layer, table_name, requested_backend, actual_backend, fallback, reason "
+            "FROM backend_events WHERE run_id=? ORDER BY ts ASC", (run_id,),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT run_id, ts, layer, table_name, requested_backend, actual_backend, fallback, reason "
+            "FROM backend_events ORDER BY ts DESC LIMIT ?", (limit,),
+        ).fetchall()
+    con.close()
+    cols = ["run_id", "ts", "layer", "table_name", "requested_backend", "actual_backend", "fallback", "reason"]
+    out = [dict(zip(cols, r)) for r in rows]
+    for d in out:
+        d["fallback"] = bool(d["fallback"])
+    return out
+
+
+
+def reconcile_stale_runs(max_running_seconds: int = 900) -> int:
+    """Close abandoned local runs so historical RUNNING does not mean active forever.
+
+    A run is considered stale when it has remained in RUNNING state longer than
+    the configured execution window without a finished_at timestamp.
+
+    This is intentionally conservative: only old RUNNING records are changed.
+    Recently started runs remain RUNNING.
+    """
+    cutoff = time.time() - max_running_seconds
+
+    con = _conn()
+    cur = con.execute(
+        """
+        UPDATE runs
+        SET
+            finished_at = ?,
+            status = 'failed',
+            summary = ?
+        WHERE status = 'running'
+          AND finished_at IS NULL
+          AND started_at < ?
+        """,
+        (
+            time.time(),
+            json.dumps({
+                "reason": "stale_run_reconciled",
+                "message": (
+                    "Execution did not report completion within the local "
+                    "runtime reconciliation window."
+                ),
+            }),
+            cutoff,
+        ),
+    )
+    changed = cur.rowcount
+    con.commit()
+    con.close()
+
+    return changed
+
+
+def get_runs(limit: int = 50):
+    con = _conn()
+    rows = con.execute(
+        "SELECT run_id, dataset, started_at, finished_at, status, summary FROM runs ORDER BY started_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    con.close()
+    cols = ["run_id", "dataset", "started_at", "finished_at", "status", "summary"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_run(run_id: str) -> Optional[dict]:
+    con = _conn()
+    row = con.execute(
+        "SELECT run_id, dataset, started_at, finished_at, status, summary FROM runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    con.close()
+    if not row:
+        return None
+    cols = ["run_id", "dataset", "started_at", "finished_at", "status", "summary"]
+    return dict(zip(cols, row))
+
+
+def get_events(run_id: str):
+    con = _conn()
+    rows = con.execute(
+        "SELECT ts, stage, level, message FROM events WHERE run_id=? ORDER BY ts ASC", (run_id,)
+    ).fetchall()
+    con.close()
+    return [dict(zip(["ts", "stage", "level", "message"], r)) for r in rows]
+
+
+def get_lineage(run_id: Optional[str] = None):
+    con = _conn()
+    if run_id:
+        rows = con.execute(
+            "SELECT source_layer, source_table, target_layer, target_table, transform FROM lineage WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT source_layer, source_table, target_layer, target_table, transform FROM lineage ORDER BY ts DESC LIMIT 200"
+        ).fetchall()
+    con.close()
+    cols = ["source_layer", "source_table", "target_layer", "target_table", "transform"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_quality_checks(run_id: str):
+    con = _conn()
+    rows = con.execute(
+        "SELECT check_name, layer, passed, details FROM quality_checks WHERE run_id=?", (run_id,)
+    ).fetchall()
+    con.close()
+    out = []
+    for r in rows:
+        d = dict(zip(["check_name", "layer", "passed", "details"], r))
+        d["passed"] = bool(d["passed"])
+        d["details"] = json.loads(d["details"]) if d["details"] else {}
+        out.append(d)
+    return out
+
+
+def get_repairs(run_id: Optional[str] = None):
+    con = _conn()
+    if run_id:
+        rows = con.execute(
+            "SELECT column_name, issue, action, rows_affected, source FROM repairs WHERE run_id=?", (run_id,)
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT column_name, issue, action, rows_affected, source FROM repairs ORDER BY ts DESC LIMIT 200"
+        ).fetchall()
+    con.close()
+    cols = ["column_name", "issue", "action", "rows_affected", "source"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Storage Manager metadata — dataset registry, notebook version history, audit log.
+# Phase 1 of the roadmap: uploads land here first (via storage/manager.py), and
+# everything downstream (Databricks Volume upload, job submission) reads FROM this
+# registry instead of re-serializing an in-memory DataFrame each time. This is what
+# makes "rerun without re-upload" and "dataset history" possible.
+# ---------------------------------------------------------------------------
+
+def register_dataset(dataset_id: str, name: str, source: str, original_filename: str,
+                      file_path: str, row_count: int, byte_size: int, checksum: str) -> None:
+    con = _conn()
+    con.execute(
+        "INSERT INTO datasets (dataset_id, name, source, original_filename, file_path, "
+        "row_count, byte_size, checksum, registered_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (dataset_id, name, source, original_filename, file_path, row_count, byte_size, checksum, time.time()),
+    )
+    con.commit()
+    con.close()
+
+
+def get_dataset(dataset_id: str) -> Optional[dict]:
+    con = _conn()
+    row = con.execute(
+        "SELECT dataset_id, name, source, original_filename, file_path, row_count, byte_size, "
+        "checksum, registered_at FROM datasets WHERE dataset_id=?", (dataset_id,),
+    ).fetchone()
+    con.close()
+    if not row:
+        return None
+    cols = ["dataset_id", "name", "source", "original_filename", "file_path", "row_count",
+            "byte_size", "checksum", "registered_at"]
+    return dict(zip(cols, row))
+
+
+def list_datasets(limit: int = 50) -> list[dict]:
+    con = _conn()
+    rows = con.execute(
+        "SELECT dataset_id, name, source, original_filename, file_path, row_count, byte_size, "
+        "checksum, registered_at FROM datasets ORDER BY registered_at DESC LIMIT ?", (limit,),
+    ).fetchall()
+    con.close()
+    cols = ["dataset_id", "name", "source", "original_filename", "file_path", "row_count",
+            "byte_size", "checksum", "registered_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def save_notebook_version(version_id: str, dataset_id: Optional[str], source_type: str, content: str,
+                           workspace_path: str, mode: str, deployed_by: str = "local-user") -> None:
+    con = _conn()
+    con.execute(
+        "INSERT INTO notebook_versions (version_id, dataset_id, source_type, content, workspace_path, "
+        "mode, deployed_at, deployed_by) VALUES (?,?,?,?,?,?,?,?)",
+        (version_id, dataset_id, source_type, content, workspace_path, mode, time.time(), deployed_by),
+    )
+    con.commit()
+    con.close()
+
+
+def list_notebook_versions(dataset_id: Optional[str] = None, limit: int = 50) -> list[dict]:
+    con = _conn()
+    if dataset_id:
+        rows = con.execute(
+            "SELECT version_id, dataset_id, source_type, workspace_path, mode, deployed_at, deployed_by "
+            "FROM notebook_versions WHERE dataset_id=? ORDER BY deployed_at DESC LIMIT ?", (dataset_id, limit),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT version_id, dataset_id, source_type, workspace_path, mode, deployed_at, deployed_by "
+            "FROM notebook_versions ORDER BY deployed_at DESC LIMIT ?", (limit,),
+        ).fetchall()
+    con.close()
+    cols = ["version_id", "dataset_id", "source_type", "workspace_path", "mode", "deployed_at", "deployed_by"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_notebook_version_content(version_id: str) -> Optional[str]:
+    con = _conn()
+    row = con.execute("SELECT content FROM notebook_versions WHERE version_id=?", (version_id,)).fetchone()
+    con.close()
+    return row[0] if row else None
+
+
+def log_audit(actor: str, action: str, target: str, details: Optional[dict] = None) -> None:
+    con = _conn()
+    con.execute(
+        "INSERT INTO audit_log (ts, actor, action, target, details) VALUES (?,?,?,?,?)",
+        (time.time(), actor, action, target, json.dumps(details or {})),
+    )
+    con.commit()
+    con.close()
+
+
+def list_audit_log(limit: int = 200) -> list[dict]:
+    con = _conn()
+    rows = con.execute(
+        "SELECT ts, actor, action, target, details FROM audit_log ORDER BY ts DESC LIMIT ?", (limit,),
+    ).fetchall()
+    con.close()
+    out = []
+    for ts, actor, action, target, details in rows:
+        out.append({"ts": ts, "actor": actor, "action": action, "target": target,
+                    "details": json.loads(details) if details else {}})
+    return out

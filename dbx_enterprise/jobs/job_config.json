@@ -1,0 +1,23 @@
+{
+  "name": "DataDoctorAI - Bronze Silver Gold",
+  "tasks": [
+    {
+      "task_key": "bronze_silver_gold",
+      "notebook_task": {
+        "notebook_path": "/Repos/DataDoctorAI/databricks/notebooks/bronze_silver_gold_job",
+        "base_parameters": {
+          "catalog": "main",
+          "schema": "default",
+          "source_path": "/Volumes/main/default/landing/dataset.csv",
+          "dataset_name": "dataset"
+        }
+      },
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 1
+      }
+    }
+  ],
+  "note": "Import via Databricks Jobs UI or `databricks jobs create --json job_config.json`. Update notebook_path to your Repos location."
+}
