@@ -1,4 +1,4 @@
-﻿# Databricks notebook source
+# Databricks notebook source
 # MAGIC %md
 # MAGIC # DataDoctorAI â€” Bronze/Silver/Gold Job (Databricks-native)
 # MAGIC Mirrors the logic in `pipeline/bronze.py`, `pipeline/silver.py`, `pipeline/gold.py`

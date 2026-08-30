@@ -5,3 +5,9 @@ storage/*.duckdb
 database/*.db
 database/app_settings.json
 .streamlit/secrets.toml
+
+.venv/
+data/uploads/
+*.bak
+*.backup
+*.before-*

@@ -144,7 +144,7 @@ def deploy_notebook(workspace_path: str = DEFAULT_WORKSPACE_NOTEBOOK_PATH,
     settings = load_settings()
     pipeline = get_pipeline_settings(settings)
     db_cfg = _cfg(mode)
-    source = content if content is not None else NOTEBOOK_SOURCE_PATH.read_text()
+    source = content if content is not None else NOTEBOOK_SOURCE_PATH.read_text(encoding="utf-8")
     payload = {
         "path": workspace_path,
         "format": "SOURCE",
@@ -166,7 +166,7 @@ def deploy_notebook(workspace_path: str = DEFAULT_WORKSPACE_NOTEBOOK_PATH,
 
 def get_bundled_notebook_source() -> str:
     """Returns the auto-generated notebook source as a starting point for editing."""
-    return NOTEBOOK_SOURCE_PATH.read_text()
+    return NOTEBOOK_SOURCE_PATH.read_text(encoding="utf-8")
 
 
 def submit_job_run(source_path: str, dataset_name: str, notebook_path: str = DEFAULT_WORKSPACE_NOTEBOOK_PATH,
@@ -217,23 +217,112 @@ def submit_job_run(source_path: str, dataset_name: str, notebook_path: str = DEF
     return str(r.json()["run_id"])
 
 
-def get_run_status(run_id: str, mode: Optional[str] = None) -> dict:
-    """One bounded-timeout status check â€” never polls in a loop, and never retries
-    (the UI itself is the retry loop, via the Refresh button)."""
+def get_run_output(run_id: str, mode: Optional[str] = None) -> dict:
+    """Fetch the actual output/error details for a Databricks job run."""
     db_cfg = _cfg(mode)
-    url = f"{_base_url(db_cfg)}/api/2.0/jobs/runs/get"
-    r = requests.get(url, headers=_headers(db_cfg), params={"run_id": run_id}, timeout=REQUEST_TIMEOUT)
+    url = f"{_base_url(db_cfg)}/api/2.0/jobs/runs/get-output"
+
+    r = requests.get(
+        url,
+        headers=_headers(db_cfg),
+        params={"run_id": run_id},
+        timeout=REQUEST_TIMEOUT,
+    )
     _raise_for_status(r)
+
     data = r.json()
-    state = data.get("state", {})
+
+    error = data.get("error", "")
+    error_trace = data.get("error_trace", "")
+    notebook_output = data.get("notebook_output") or {}
+
     return {
         "run_id": run_id,
-        "life_cycle_state": state.get("life_cycle_state", "UNKNOWN"),
-        "result_state": state.get("result_state", ""),
-        "state_message": state.get("state_message", ""),
-        "run_page_url": data.get("run_page_url", ""),
-        "start_time": data.get("start_time"),
-        "end_time": data.get("end_time"),
+        "error": error,
+        "error_trace": error_trace,
+        "notebook_output": notebook_output,
+        "metadata": data.get("metadata") or {},
     }
 
 
+def get_run_status(run_id: str, mode: Optional[str] = None) -> dict:
+    """Return Databricks run state and task-level failure details.
+
+    Performs one bounded-time API request. The UI controls refresh/polling.
+    """
+    db_cfg = _cfg(mode)
+    url = f"{_base_url(db_cfg)}/api/2.0/jobs/runs/get"
+
+    r = requests.get(
+        url,
+        headers=_headers(db_cfg),
+        params={"run_id": run_id},
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(r)
+
+    data = r.json()
+    state = data.get("state", {})
+
+    tasks = data.get("tasks") or []
+    task_errors = []
+
+    for task in tasks:
+        task_key = task.get("task_key", "")
+        task_state = task.get("state") or {}
+
+        result_state = task_state.get("result_state", "")
+        state_message = task_state.get("state_message", "")
+
+        if result_state == "FAILED" or state_message:
+            task_errors.append(
+                {
+                    "task_key": task_key,
+                    "life_cycle_state": task_state.get(
+                        "life_cycle_state",
+                        "UNKNOWN",
+                    ),
+                    "result_state": result_state,
+                    "state_message": state_message,
+                }
+            )
+
+    error_message = ""
+
+    if task_errors:
+        parts = []
+
+        for item in task_errors:
+            label = item["task_key"] or "task"
+            message = (
+                item["state_message"]
+                or item["result_state"]
+                or "Unknown failure"
+            )
+            parts.append(f"{label}: {message}")
+
+        error_message = " | ".join(parts)
+
+    return {
+        "run_id": run_id,
+        "life_cycle_state": state.get(
+            "life_cycle_state",
+            "UNKNOWN",
+        ),
+        "result_state": state.get(
+            "result_state",
+            "",
+        ),
+        "state_message": state.get(
+            "state_message",
+            "",
+        ),
+        "error_message": error_message,
+        "task_errors": task_errors,
+        "run_page_url": data.get(
+            "run_page_url",
+            "",
+        ),
+        "start_time": data.get("start_time"),
+        "end_time": data.get("end_time"),
+    }

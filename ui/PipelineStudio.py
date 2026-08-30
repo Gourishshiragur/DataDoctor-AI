@@ -1,5 +1,5 @@
-﻿from concurrent.futures import ThreadPoolExecutor
-"""ui/PipelineStudio.py â€” the heart of the app: upload/select a dataset and watch it
+from concurrent.futures import ThreadPoolExecutor
+"""ui/PipelineStudio.py — the heart of the app: upload/select a dataset and watch it
 flow live through Bronze -> Quality Checks -> Self-Healing Repair -> Silver ->
 Quality Re-check -> Gold, with every step streamed to the screen as it happens.
 """
@@ -24,26 +24,26 @@ from ui._common import dataset_picker, score_color
 
 
 def _backend_badge():
-    """Shows which storage backend actually served the write just made â€” both modes now
+    """Shows which storage backend actually served the write just made — both modes now
     try their own workspace's Databricks credentials first and fall back to DuckDB if
     unreachable, so this reflects reality rather than assuming Enterprise=Databricks."""
     status = storage_router.get_last_status()
     mode_label = status.get("mode", "demo").title()
     if status["fallback"]:
         st.caption(
-            f"ðŸ’¾ Served by **DuckDB (fallback)** â€” {mode_label} Mode's Databricks unavailable: {status['reason']}"
+            f"💾 Served by **DuckDB (fallback)** — {mode_label} Mode's Databricks unavailable: {status['reason']}"
         )
     elif status["actual_backend"] == "databricks":
         st.caption(
-            f"ðŸ’¾ Served by **Databricks SQL Warehouse** ({mode_label} workspace)"
+            f"💾 Served by **Databricks SQL Warehouse** ({mode_label} workspace)"
         )
     else:
-        st.caption(f"ðŸ’¾ Served by **DuckDB** ({mode_label} Mode)")
+        st.caption(f"💾 Served by **DuckDB** ({mode_label} Mode)")
 
 
 def _live_delay():
     # tiny delay per step so the "live process" is visibly sequential rather than
-    # a single instant render â€” real work (profiling/repair/SQL) still dominates the time.
+    # a single instant render — real work (profiling/repair/SQL) still dominates the time.
     time.sleep(0.35)
 
 
@@ -56,10 +56,10 @@ def _human_size(num_bytes: float) -> str:
 
 
 def _render_animated_flow(dataset_name: str, silver_result: dict, gold_result: dict):
-    """Animated data-flow diagram â€” real SVG/SMIL motion (not a GIF, not decorative):
+    """Animated data-flow diagram — real SVG/SMIL motion (not a GIF, not decorative):
     particle count per path is proportional to actual row volume between stages, and
     particle color reflects the real backend that served that stage. Numbers shown are
-    the same ones the Sankey diagram uses â€” this is a visual layer on top of real data,
+    the same ones the Sankey diagram uses — this is a visual layer on top of real data,
     not a separate illustrative animation."""
     bronze_df = st.session_state.get("bronze_df")
     if bronze_df is None:
@@ -96,7 +96,7 @@ def _render_animated_flow(dataset_name: str, silver_result: dict, gold_result: d
                 fill="{color}" fill-opacity="0.15" stroke="{color}" stroke-width="2"/>
           <text x="{node_x[i]}" y="{node_y-8}" text-anchor="middle" font-size="13" font-weight="600" fill="#e2e8f0">{label}</text>
           <text x="{node_x[i]}" y="{node_y+10}" text-anchor="middle" font-size="11" fill="#94a3b8">{len(sdf):,} rows</text>
-          <text x="{node_x[i]}" y="{node_y+24}" text-anchor="middle" font-size="10" fill="#64748b">{_human_size(vol)}{' Â· ' + backend if backend else ''}</text>
+          <text x="{node_x[i]}" y="{node_y+24}" text-anchor="middle" font-size="10" fill="#64748b">{_human_size(vol)}{' · ' + backend if backend else ''}</text>
         </g>"""
 
     for i in range(3):
@@ -106,7 +106,7 @@ def _render_animated_flow(dataset_name: str, silver_result: dict, gold_result: d
             i
         ]  # volume flowing OUT of the source stage into the next
         n_particles = max(2, min(12, round(10 * rows_on_path / max_rows)))
-        speed = 3.0  # seconds per full traversal â€” constant so relative density (not speed) encodes volume
+        speed = 3.0  # seconds per full traversal — constant so relative density (not speed) encodes volume
         target_backend = stages[i + 1][2]
         color = backend_color.get(target_backend, "#94a3b8")
         paths_svg += f'<path id="{path_id}" d="M{x1},{node_y} L{x2},{node_y}" fill="none" stroke="#334155" stroke-width="2"/>'
@@ -131,7 +131,7 @@ def _render_animated_flow(dataset_name: str, silver_result: dict, gold_result: d
 def _render_data_flow_diagram(
     dataset_name: str, silver_result: dict, gold_result: dict
 ):
-    """A Sankey diagram of the just-completed run â€” every number here is read straight
+    """A Sankey diagram of the just-completed run — every number here is read straight
     from the actual DataFrames produced (row counts, in-memory byte size) and the real
     backend_events log for this run_id. Nothing here is simulated; if the run doesn't
     have the data, the diagram doesn't claim it does."""
@@ -156,8 +156,8 @@ def _render_data_flow_diagram(
     labels, row_counts = [], []
     for label, sdf, backend in stages:
         vol = sdf.memory_usage(deep=True).sum()
-        backend_tag = f" Â· {backend}" if backend else ""
-        labels.append(f"{label}<br>{len(sdf):,} rows Â· {_human_size(vol)}{backend_tag}")
+        backend_tag = f" · {backend}" if backend else ""
+        labels.append(f"{label}<br>{len(sdf):,} rows · {_human_size(vol)}{backend_tag}")
         row_counts.append(len(sdf))
 
     fig = go.Figure(
@@ -207,7 +207,7 @@ def _submit_job(
     """Shared submission steps: ensure Volume -> upload -> deploy notebook -> submit Job.
     Used by both the primary 'Run Pipeline' button and the advanced panel below, so
     both go through the exact same real steps rather than two divergent code paths.
-    Returns (run_id, notebook_path). Raises on any failure â€” callers decide how to
+    Returns (run_id, notebook_path). Raises on any failure — callers decide how to
     surface it (the primary button auto-falls back; the advanced panel shows + offers
     the same fallback)."""
     storage_id = (
@@ -490,10 +490,365 @@ def _run_orchestrated_pipeline(
     )
 
 
-def render():
-    st.title("ðŸ§ª Pipeline Studio")
+
+def _render_persistent_databricks_status(restored: dict):
+    """Render a navigation-safe live view from durable Databricks state.
+
+    This renderer deliberately does NOT depend on Streamlit session_state
+    DataFrames. Databricks owns the real execution; Studio only reconstructs
+    the visible state after a page navigation/rerun.
+    """
+    import json
+
+    run_id = str(restored.get("run_id") or "")
+    summary = restored.get("summary") or {}
+
+    if isinstance(summary, str):
+        try:
+            summary = json.loads(summary)
+        except Exception:
+            summary = {}
+
+    dbx_status = restored.get("_dbx_status") or {}
+    dbx_run_id = str(
+        dbx_status.get("run_id")
+        or summary.get("dbx_run_id")
+        or ""
+    )
+
+    lifecycle = str(
+        dbx_status.get("life_cycle_state")
+        or "RUNNING"
+    )
+    state_message = str(
+        dbx_status.get("state_message")
+        or ""
+    )
+
+    st.divider()
+    st.subheader("? Live Pipeline Execution")
+
+    st.info(
+        f"Databricks Spark Job **{dbx_run_id}** is running independently. "
+        "You can navigate between Dashboard, Monitor and Studio without "
+        "cancelling the pipeline."
+    )
+
+    # CSS animation is purely visual. It is NOT the execution mechanism.
+    components.html(
+        """
+        <style>
+        .ddx-live-wrap {
+            padding: 14px 4px 8px 4px;
+        }
+
+        .ddx-live-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: sans-serif;
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+
+        .ddx-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #22c55e;
+            animation: ddx-pulse 1.2s infinite;
+        }
+
+        @keyframes ddx-pulse {
+            0%, 100% { opacity: .35; transform: scale(.85); }
+            50% { opacity: 1; transform: scale(1.15); }
+        }
+
+        .ddx-track {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            gap: 0;
+        }
+
+        .ddx-stage {
+            flex: 1;
+            text-align: center;
+            font-family: sans-serif;
+        }
+
+        .ddx-node {
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            margin: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 2px solid #f97316;
+            background: rgba(249,115,22,.12);
+            font-size: 21px;
+            animation: ddx-glow 1.8s infinite;
+        }
+
+        @keyframes ddx-glow {
+            0%, 100% { box-shadow: 0 0 0 rgba(249,115,22,0); }
+            50% { box-shadow: 0 0 18px rgba(249,115,22,.35); }
+        }
+
+        .ddx-label {
+            margin-top: 7px;
+            color: #cbd5e1;
+            font-size: 12px;
+        }
+
+        .ddx-line {
+            flex: .7;
+            height: 2px;
+            background: #475569;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .ddx-line:after {
+            content: "";
+            position: absolute;
+            left: -30%;
+            top: 0;
+            width: 30%;
+            height: 100%;
+            background: #f97316;
+            animation: ddx-flow 1.4s linear infinite;
+        }
+
+        @keyframes ddx-flow {
+            from { left: -30%; }
+            to { left: 100%; }
+        }
+
+        .ddx-meta {
+            margin-top: 15px;
+            color: #94a3b8;
+            font-family: sans-serif;
+            font-size: 12px;
+        }
+        </style>
+
+        <div class="ddx-live-wrap">
+          <div class="ddx-live-header">
+            <span class="ddx-dot"></span>
+            <span>Databricks Spark execution is active</span>
+          </div>
+
+          <div class="ddx-track">
+            <div class="ddx-stage">
+              <div class="ddx-node">??</div>
+              <div class="ddx-label">Uploaded</div>
+            </div>
+
+            <div class="ddx-line"></div>
+
+            <div class="ddx-stage">
+              <div class="ddx-node">??</div>
+              <div class="ddx-label">Bronze</div>
+            </div>
+
+            <div class="ddx-line"></div>
+
+            <div class="ddx-stage">
+              <div class="ddx-node">??</div>
+              <div class="ddx-label">Quality</div>
+            </div>
+
+            <div class="ddx-line"></div>
+
+            <div class="ddx-stage">
+              <div class="ddx-node">???</div>
+              <div class="ddx-label">Repair</div>
+            </div>
+
+            <div class="ddx-line"></div>
+
+            <div class="ddx-stage">
+              <div class="ddx-node">??</div>
+              <div class="ddx-label">Silver</div>
+            </div>
+
+            <div class="ddx-line"></div>
+
+            <div class="ddx-stage">
+              <div class="ddx-node">??</div>
+              <div class="ddx-label">Gold</div>
+            </div>
+          </div>
+        </div>
+        """,
+        height=155,
+    )
+
     st.caption(
-        "Ingest a dataset and watch it self-heal live: Bronze â†’ Quality Check â†’ Repair â†’ Silver â†’ Gold."
+        f"Databricks run: `{dbx_run_id}` ? lifecycle: **{lifecycle}**"
+        + (f" ? {state_message}" if state_message else "")
+    )
+
+    run_page_url = dbx_status.get("run_page_url") or summary.get(
+        "databricks_run_page_url"
+    )
+
+    if run_page_url:
+        st.link_button(
+            "Open Databricks Run",
+            run_page_url,
+        )
+
+
+def _restore_persistent_databricks_run(dataset_name: str, mode: str):
+    """
+    Restore the latest persisted Databricks execution into Streamlit state.
+
+    Streamlit reruns when the user changes pages. Therefore the live pipeline
+    MUST NOT depend on st.session_state surviving navigation.
+
+    SQLite history is authoritative for the internal run and contains the real
+    Databricks run ID. Databricks itself remains the execution owner.
+    """
+    import json
+
+    try:
+        runs = history.get_runs(limit=25)
+
+        for run in runs:
+            if str(run.get("dataset") or "") != str(dataset_name):
+                continue
+
+            summary = run.get("summary") or {}
+
+            if isinstance(summary, str):
+                try:
+                    summary = json.loads(summary)
+                except Exception:
+                    continue
+
+            if not isinstance(summary, dict):
+                continue
+
+            dbx_run_id = summary.get("dbx_run_id")
+            run_mode = summary.get("mode") or mode
+
+            if not dbx_run_id:
+                continue
+
+            status = str(run.get("status") or "").lower()
+
+            # Terminal runs are still useful for showing the final result,
+            # but they must never be rendered as an active animation.
+            if status in {"success", "failed", "cancelled"}:
+                st.session_state.last_run_id = run["run_id"]
+                st.session_state.active_databricks_run_id = None
+                return run
+
+            if status != "running":
+                continue
+
+            # Restore the persistent internal identity first.
+            st.session_state.last_run_id = run["run_id"]
+            st.session_state.active_dataset = dataset_name
+            st.session_state.active_databricks_run_id = str(dbx_run_id)
+
+            # Check Databricks exactly once on this Streamlit rerun.
+            try:
+                from dbx_enterprise import jobs as dbx_jobs
+
+                dbx_status = dbx_jobs.get_run_status(
+                    str(dbx_run_id),
+                    mode=run_mode,
+                )
+
+                lifecycle = dbx_status.get("life_cycle_state")
+                result = dbx_status.get("result_state")
+
+                if lifecycle in ("PENDING", "RUNNING"):
+                    return {
+                        **run,
+                        "_dbx_status": dbx_status,
+                        "_live": True,
+                    }
+
+                if lifecycle == "TERMINATED" and result == "SUCCESS":
+                    history.finish_run(
+                        run["run_id"],
+                        "success",
+                        {
+                            **summary,
+                            "result_state": result,
+                            "life_cycle_state": lifecycle,
+                            "databricks_run_page_url":
+                                dbx_status.get("run_page_url", ""),
+                        },
+                    )
+                    st.session_state.active_databricks_run_id = None
+
+                    return {
+                        **run,
+                        "status": "success",
+                        "_dbx_status": dbx_status,
+                        "_live": False,
+                    }
+
+                if lifecycle in {
+                    "TERMINATED",
+                    "SKIPPED",
+                    "INTERNAL_ERROR",
+                }:
+                    error = (
+                        dbx_status.get("error_message")
+                        or dbx_status.get("state_message")
+                        or "Databricks job failed"
+                    )
+
+                    history.finish_run(
+                        run["run_id"],
+                        "failed",
+                        {
+                            **summary,
+                            "reason": "databricks_job_failed",
+                            "error": error,
+                            "result_state": result,
+                            "life_cycle_state": lifecycle,
+                            "databricks_run_page_url":
+                                dbx_status.get("run_page_url", ""),
+                        },
+                    )
+
+                    st.session_state.active_databricks_run_id = None
+
+                    return {
+                        **run,
+                        "status": "failed",
+                        "_dbx_status": dbx_status,
+                        "_live": False,
+                    }
+
+            except Exception:
+                # Do NOT mark the Databricks job failed merely because the
+                # Studio page temporarily cannot reach Databricks.
+                return {
+                    **run,
+                    "_live": True,
+                    "_dbx_unreachable": True,
+                }
+
+        return None
+
+    except Exception:
+        return None
+
+
+def render():
+    st.title("🧪 Pipeline Studio")
+    st.caption(
+        "Ingest a dataset and watch it self-heal live: Bronze → Quality Check → Repair → Silver → Gold."
     )
 
     dataset_name, df = dataset_picker(key_prefix="studio")
@@ -501,12 +856,39 @@ def render():
         st.stop()
 
     st.session_state.active_dataset = dataset_name
+
+    # Every Studio page render attempts to restore the persistent execution.
+    # This survives Streamlit navigation/reruns.
+    try:
+        restored = _restore_persistent_databricks_run(
+            dataset_name,
+            current_mode(load_settings()),
+        )
+
+        if restored and restored.get("_live"):
+            st.session_state.last_run_id = restored["run_id"]
+            st.session_state.active_dataset = dataset_name
+            st.session_state.active_databricks_run_id = str(
+                restored.get("_dbx_status", {}).get(
+                    "run_id",
+                    restored.get("dbx_run_id", ""),
+                )
+            )
+
+            # IMPORTANT:
+            # Streamlit navigation destroys the previous page render.
+            # The Databricks job continues independently, so restore the
+            # visible running state from durable history.
+            _render_persistent_databricks_status(restored)
+    except Exception:
+        pass
+
     data_volume_bytes = df.memory_usage(deep=True).sum()
 
-    with st.expander("ðŸ” Preview raw data", expanded=False):
+    with st.expander("🔍 Preview raw data", expanded=False):
         st.dataframe(df.head(20), use_container_width=True)
         st.caption(
-            f"{len(df):,} rows Ã— {df.shape[1]} columns â€” **{_human_size(data_volume_bytes)}** in memory"
+            f"{len(df):,} rows × {df.shape[1]} columns — **{_human_size(data_volume_bytes)}** in memory"
         )
 
     explain_toggle = st.toggle(
@@ -520,15 +902,15 @@ def render():
     databricks_ready = is_databricks_configured(settings, mode)
     if databricks_ready:
         st.caption(
-            f"âš¡ Will orchestrate via **Databricks** ({mode.title()} workspace, real Spark) â€” "
+            f"⚡ Will orchestrate via **Databricks** ({mode.title()} workspace, real Spark) — "
             "falls back to the in-app pipeline if the Job fails."
         )
-        button_label = "â–¶ï¸ Run Pipeline"
+        button_label = "▶️ Run Pipeline"
     else:
         st.caption(
-            "ðŸ’¾ No Databricks configured for this mode â€” running the in-app pipeline directly."
+            "💾 No Databricks configured for this mode — running the in-app pipeline directly."
         )
-        button_label = "â–¶ï¸ Run Pipeline"
+        button_label = "▶️ Run Pipeline"
 
     st.caption(
         f"DataDoctorAI orchestration ? {mode.title()} workspace ? "
@@ -540,6 +922,7 @@ def render():
             _run_orchestrated_pipeline(dataset_name, df, mode, explain_toggle)
         else:
             run_id = history.new_run(dataset_name)
+            runtime_state.create_run(run_id, dataset_name, mode="demo")
             st.session_state.last_run_id = run_id
             _execute_pipeline(dataset_name, df, run_id, explain_toggle)
 
@@ -558,12 +941,12 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
     data_volume_bytes = df.memory_usage(deep=True).sum()
 
     # ---------------- BRONZE ----------------
-    with st.status("ðŸ¥‰ Bronze â€” raw ingestion", expanded=True) as status:
+    with st.status("🥉 Bronze — raw ingestion", expanded=True) as status:
         history.log_event(
             run_id, "bronze", f"Ingesting {len(df)} rows into Bronze layer"
         )
         st.write(
-            f"Ingesting **{len(df)} rows Ã— {df.shape[1]} columns** ({_human_size(data_volume_bytes)}) as-is, tagging with ingestion metadata..."
+            f"Ingesting **{len(df)} rows × {df.shape[1]} columns** ({_human_size(data_volume_bytes)}) as-is, tagging with ingestion metadata..."
         )
         runtime_state.update_stage(
             run_id,
@@ -584,15 +967,15 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
             message=f"Bronze materialized: {len(bronze_df):,} rows",
         )
         st.write(
-            f"âœ… Wrote table `bronze__{dataset_name}` ({len(bronze_df):,} rows, "
+            f"✅ Wrote table `bronze__{dataset_name}` ({len(bronze_df):,} rows, "
             f"{_human_size(bronze_df.memory_usage(deep=True).sum())})."
         )
         _backend_badge()
-        status.update(label="ðŸ¥‰ Bronze â€” complete", state="complete")
+        status.update(label="🥉 Bronze — complete", state="complete")
     progress.progress(20, text="Bronze complete")
 
     # ---------------- PROFILING ----------------
-    with st.status("ðŸ“ Profiling raw data", expanded=True) as status:
+    with st.status("📐 Profiling raw data", expanded=True) as status:
         runtime_state.update_stage(
             run_id,
             "profiling",
@@ -619,12 +1002,12 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
             f"**{raw_profile['overall_null_pct']}% average nulls** across columns."
         )
         st.write(f"Initial quality score: {score_color(raw_score)} **{raw_score}/100**")
-        status.update(label="ðŸ“ Profiling â€” complete", state="complete")
+        status.update(label="📐 Profiling — complete", state="complete")
     progress.progress(35, text="Profiling complete")
 
     # ---------------- SILVER (quality + repair) ----------------
     with st.status(
-        "ðŸ¥ˆ Silver â€” quality checks & self-healing repair", expanded=True
+        "🥈 Silver — quality checks & self-healing repair", expanded=True
     ) as status:
         history.log_event(run_id, "silver", "Running pre-repair quality checks")
         st.write(
@@ -636,7 +1019,7 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
 
         failed_pre = [c for c in result["pre_checks"] if not c["passed"]]
         st.write(
-            f"âš ï¸ **{len(failed_pre)}/{len(result['pre_checks'])}** checks failed before repair."
+            f"⚠️ **{len(failed_pre)}/{len(result['pre_checks'])}** checks failed before repair."
         )
 
         runtime_state.update_stage(
@@ -660,12 +1043,12 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
             st.write("**Self-healing actions taken:**")
             for action in result["repair_actions"]:
                 _live_delay()
-                line = f"- `{action['column_name']}` â€” {action['issue']} â†’ **{action['action']}** ({action['rows_affected']} rows)"
+                line = f"- `{action['column_name']}` — {action['issue']} → **{action['action']}** ({action['rows_affected']} rows)"
                 st.markdown(line)
                 if action.get("explanation"):
-                    st.caption(f"ðŸ©º {action['explanation']}")
+                    st.caption(f"🩺 {action['explanation']}")
         else:
-            st.write("No repairs were necessary â€” data already passed all checks.")
+            st.write("No repairs were necessary — data already passed all checks.")
 
         runtime_state.update_stage(
             run_id,
@@ -691,10 +1074,10 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
 
         if failed_post:
             st.warning(
-                f"{len(failed_post)} check(s) still failing after repair â€” see Monitor for details."
+                f"{len(failed_post)} check(s) still failing after repair — see Monitor for details."
             )
         else:
-            st.success("âœ… All quality checks passing after self-healing.")
+            st.success("✅ All quality checks passing after self-healing.")
         history.log_event(
             run_id,
             "silver",
@@ -702,11 +1085,11 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
         )
         if result.get("below_minimum"):
             st.warning(
-                f"âš ï¸ Quality score **{result['quality_score']}** is below your configured minimum "
-                f"({load_settings()['quality']['minimum_score']}) â€” check Settings to adjust the threshold."
+                f"⚠️ Quality score **{result['quality_score']}** is below your configured minimum "
+                f"({load_settings()['quality']['minimum_score']}) — check Settings to adjust the threshold."
             )
         else:
-            st.caption(f"Quality score: **{result.get('quality_score', 'â€”')}**/100")
+            st.caption(f"Quality score: **{result.get('quality_score', '—')}**/100")
         runtime_state.update_stage(
             run_id,
             "silver",
@@ -725,11 +1108,11 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
         )
 
         _backend_badge()
-        status.update(label="ðŸ¥ˆ Silver â€” complete", state="complete")
+        status.update(label="🥈 Silver — complete", state="complete")
     progress.progress(70, text="Silver complete")
 
     # ---------------- GOLD ----------------
-    with st.status("ðŸ¥‡ Gold â€” business aggregation", expanded=True) as status:
+    with st.status("🥇 Gold — business aggregation", expanded=True) as status:
         runtime_state.update_stage(
             run_id,
             "gold",
@@ -759,18 +1142,18 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
             )
         )
         _backend_badge()
-        status.update(label="ðŸ¥‡ Gold â€” complete", state="complete")
+        status.update(label="🥇 Gold — complete", state="complete")
     progress.progress(90, text="Gold complete")
 
     # ---------------- AI PIPELINE PLAN (bonus insight) ----------------
-    with st.status("ðŸ¤– AI reviewing pipeline design", expanded=True) as status:
+    with st.status("🤖 AI reviewing pipeline design", expanded=True) as status:
         _live_delay()
         dtypes = {c: str(t) for c, t in df.dtypes.items()}
         plan = business_assistant.suggest_pipeline_plan(dtypes)
         st.write(plan["plan"])
         st.caption(f"via {plan['provider']}")
-        status.update(label="ðŸ¤– AI review â€” complete", state="complete")
-    progress.progress(100, text="Pipeline complete âœ…")
+        status.update(label="🤖 AI review — complete", state="complete")
+    progress.progress(100, text="Pipeline complete ✅")
 
     history.finish_run(
         run_id,
@@ -789,7 +1172,7 @@ def _execute_pipeline(dataset_name: str, df: pd.DataFrame, run_id: str, explain:
 def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
     """Available in BOTH modes now: uploads the dataset to a Unity Catalog Volume and
     submits a real Databricks Job that runs Bronze/Silver/Gold natively as Spark on
-    the active mode's workspace (dbx_enterprise/notebooks/bronze_silver_gold_job.py) â€”
+    the active mode's workspace (dbx_enterprise/notebooks/bronze_silver_gold_job.py) —
     separate from the in-app pandas pipeline above. Hidden entirely when that mode's
     Databricks credentials aren't configured."""
     settings = load_settings()
@@ -799,13 +1182,13 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
 
     st.divider()
     with st.expander(
-        f"âš¡ Advanced: Run Native Databricks Spark Job â€” {mode.title()} workspace (Spark)",
+        f"⚡ Advanced: Run Native Databricks Spark Job — {mode.title()} workspace (Spark)",
         expanded=False,
     ):
         st.caption(
             f"Uploads this dataset to a Unity Catalog Volume on your **{mode.title()} Mode** workspace "
-            "and submits a real Databricks Job that runs Bronze â†’ Silver â†’ Gold as PySpark on "
-            "serverless compute â€” the transformation executes natively in your workspace instead of "
+            "and submits a real Databricks Job that runs Bronze → Silver → Gold as PySpark on "
+            "serverless compute — the transformation executes natively in your workspace instead of "
             "in this app's process. Defaults to serverless since most free-edition workspaces can't "
             "provision classic clusters."
         )
@@ -826,12 +1209,12 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
                 ),
                 height=300,
                 key="dbx_custom_notebook_source",
-                help="Starts pre-filled with the bundled notebook â€” edit freely. Deployed to your "
+                help="Starts pre-filled with the bundled notebook — edit freely. Deployed to your "
                 "workspace exactly as written when you submit.",
             )
 
         if st.button(
-            "ðŸš€ Submit Databricks Job", key="submit_dbx_job", use_container_width=True
+            "🚀 Submit Databricks Job", key="submit_dbx_job", use_container_width=True
         ):
             try:
                 with st.spinner(
@@ -844,7 +1227,7 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
                 st.session_state.dbx_job_dataset = dataset_name
                 st.session_state.dbx_job_mode = mode
                 st.success(
-                    f"Job submitted â€” run_id `{run_id}`. Expand below and click Refresh to track it."
+                    f"Job submitted — run_id `{run_id}`. Expand below and click Refresh to track it."
                 )
             except Exception as e:  # noqa: BLE001
                 st.error(f"Could not submit Databricks Job: {e}")
@@ -855,11 +1238,12 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
                     {"mode": mode, "error": str(e)},
                 )
                 st.warning(
-                    "âš ï¸ **Falling back to the in-app pipeline** since the native Job "
-                    "couldn't be submitted â€” this run will use the SQL Warehouse/DuckDB "
+                    "⚠️ **Falling back to the in-app pipeline** since the native Job "
+                    "couldn't be submitted — this run will use the SQL Warehouse/DuckDB "
                     "path instead of Spark. Logged to the audit trail."
                 )
                 fallback_run_id = history.new_run(dataset_name)
+                runtime_state.create_run(fallback_run_id, dataset_name, mode="demo")
                 history.log_audit(
                     "local-user",
                     "auto_fallback_triggered",
@@ -872,12 +1256,12 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
 
 
 def _render_results(dataset_name: str):
-    st.subheader("ðŸ“ˆ Results")
+    st.subheader("📈 Results")
     silver_result = st.session_state.silver_result
     gold_result = st.session_state.gold_result
 
     _render_animated_flow(dataset_name, silver_result, gold_result)
-    with st.expander("ðŸ” Exact flow numbers (Sankey)", expanded=False):
+    with st.expander("🔍 Exact flow numbers (Sankey)", expanded=False):
         _render_data_flow_diagram(dataset_name, silver_result, gold_result)
 
     tab1, tab2, tab3 = st.tabs(
@@ -894,10 +1278,12 @@ def _render_results(dataset_name: str):
         )
     with tab3:
         for c in silver_result["post_checks"]:
-            icon = "âœ…" if c["passed"] else "âŒ"
+            icon = "✅" if c["passed"] else "❌"
             st.write(f"{icon} **{c['check_name']}**")
             if not c["passed"]:
                 st.json(c["details"])
+
+
 
 
 

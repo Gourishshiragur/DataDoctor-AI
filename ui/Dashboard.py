@@ -283,7 +283,12 @@ def _hydrate_databricks_results(run: dict, summary: dict, mode: str) -> bool:
 
 
 def _sync_persistent_databricks_runs():
-    """Observe persisted Databricks jobs independently of Pipeline Studio."""
+    """Synchronize persisted Databricks executions with local history.
+
+    Databricks terminal state is authoritative. Result hydration is
+    best-effort and must never prevent a successful/failed Databricks
+    execution from being finalized in SQLite.
+    """
     try:
         import json
         from database import history
@@ -293,7 +298,7 @@ def _sync_persistent_databricks_runs():
         runs = history.get_runs(limit=25)
 
         for run in runs:
-            if run.get("status") != "running":
+            if str(run.get("status") or "").lower() != "running":
                 continue
 
             summary = run.get("summary") or {}
@@ -310,62 +315,126 @@ def _sync_persistent_databricks_runs():
             if not dbx_run_id or not mode:
                 continue
 
-            status = dbx_jobs.get_run_status(
-                dbx_run_id,
-                mode=mode,
-            )
+            try:
+                status = dbx_jobs.get_run_status(
+                    str(dbx_run_id),
+                    mode=mode,
+                )
+            except Exception:
+                # A temporary Databricks API failure must not turn a
+                # legitimately running job into FAILED.
+                continue
 
-            lifecycle = status.get("life_cycle_state")
-            result = status.get("result_state")
+            lifecycle = str(
+                status.get("life_cycle_state") or ""
+            ).upper()
+            result = str(
+                status.get("result_state") or ""
+            ).upper()
 
             if lifecycle in ("PENDING", "RUNNING"):
-                runtime_state.update_stage(
-                    run["run_id"],
-                    "bronze",
-                    "running",
-                    message=(
-                        f"Databricks Spark Job {dbx_run_id} — "
-                        f"{lifecycle}"
-                    ),
-                )
+                # The in-memory runtime can disappear when Streamlit
+                # reruns or when the user navigates between pages.
+                # Reconstruct it from durable SQLite history first.
+                if runtime_state.get_run(run["run_id"]) is None:
+                    runtime_state.recover_run(run["run_id"])
 
-            elif lifecycle == "TERMINATED" and result == "SUCCESS":
-                hydrated = _hydrate_databricks_results(
-                    run,
-                    summary,
-                    mode,
-                )
-
-                for stage in (
-                    "bronze",
-                    "profiling",
-                    "quality",
-                    "repair",
-                    "silver",
-                    "gold",
-                ):
+                if runtime_state.get_run(run["run_id"]) is not None:
                     runtime_state.update_stage(
                         run["run_id"],
-                        stage,
-                        "success",
+                        "bronze",
+                        "running",
                         message=(
-                            "Completed by Databricks Spark Job"
-                            + (" ? results loaded" if hydrated else "")
+                            f"Databricks Spark Job {dbx_run_id} ? "
+                            f"{lifecycle}"
                         ),
                     )
+                continue
 
+            # ---------------------------------------------------------
+            # TERMINAL SUCCESS
+            #
+            # Finalize SQLite FIRST. Hydration is optional and must
+            # never be able to leave a completed Databricks run stuck
+            # in RUNNING state.
+            # ---------------------------------------------------------
+            if lifecycle == "TERMINATED" and result == "SUCCESS":
+                success_summary = {
+                    **summary,
+                    "result_state": result,
+                    "life_cycle_state": lifecycle,
+                    "databricks_run_page_url": status.get(
+                        "run_page_url", ""
+                    ),
+                    "results_hydrated": False,
+                }
+
+                # Authoritative state transition.
                 history.finish_run(
                     run["run_id"],
                     "success",
-                    {
-                        **summary,
-                        "result_state": result,
-                        "life_cycle_state": lifecycle,
-                        "results_hydrated": hydrated,
-                    },
+                    success_summary,
                 )
 
-            elif lifecycle in (
+                # Reconstruct the completed visual state from the
+                # durable SQLite record. This is necessary because the
+                # in-memory runtime may not exist after page navigation.
+                runtime_state.recover_run(run["run_id"])
+
+                if runtime_state.get_run(run["run_id"]) is not None:
+                    for stage in (
+                        "bronze",
+                        "profiling",
+                        "quality",
+                        "repair",
+                        "silver",
+                        "gold",
+                    ):
+                        runtime_state.update_stage(
+                            run["run_id"],
+                            stage,
+                            "success",
+                            message="Completed by Databricks Spark Job",
+                        )
+
+                # Hydration is deliberately best-effort.
+                try:
+                    hydrated = _hydrate_databricks_results(
+                        run,
+                        summary,
+                        mode,
+                    )
+
+                    if hydrated:
+                        success_summary["results_hydrated"] = True
+                        history.finish_run(
+                            run["run_id"],
+                            "success",
+                            success_summary,
+                        )
+
+                except Exception as hydration_error:
+                    success_summary["hydration_error"] = str(
+                        hydration_error
+                    )
+
+                    # Keep the authoritative SUCCESS state while
+                    # recording why optional result hydration failed.
+                    try:
+                        history.finish_run(
+                            run["run_id"],
+                            "success",
+                            success_summary,
+                        )
+                    except Exception:
+                        pass
+
+                continue
+
+            # ---------------------------------------------------------
+            # TERMINAL FAILURE
+            # ---------------------------------------------------------
+            if lifecycle in (
                 "TERMINATED",
                 "SKIPPED",
                 "INTERNAL_ERROR",
@@ -375,6 +444,15 @@ def _sync_persistent_databricks_runs():
                     f"{lifecycle} / "
                     f"{result or 'no result state'}"
                 )
+
+                detailed_error = (
+                    status.get("error_message")
+                    or status.get("state_message")
+                    or ""
+                )
+
+                if detailed_error:
+                    error_message += f" ? {detailed_error}"
 
                 runtime_state.update_stage(
                     run["run_id"],
@@ -390,15 +468,18 @@ def _sync_persistent_databricks_runs():
                         **summary,
                         "reason": "databricks_job_failed",
                         "error": error_message,
+                        "result_state": result,
+                        "life_cycle_state": lifecycle,
                     },
                 )
 
-    except Exception:
-        # Dashboard must remain usable even if Databricks status
-        # temporarily cannot be queried.
-        pass
-
-
+    except Exception as exc:
+        # Dashboard must remain usable even if synchronization itself
+        # encounters an unexpected error.
+        print(
+            "WARNING: Databricks synchronization failed:",
+            repr(exc),
+        )
 
 def render():
     _sync_persistent_databricks_runs()
@@ -446,12 +527,14 @@ def render():
 
         current_runtime = runtime_state.get_run(latest_run_id)
 
-        if persisted_status in terminal_statuses:
-            runtime_state.recover_run(latest_run_id)
-        elif current_runtime is None:
-            runtime_state.recover_run(latest_run_id)
+        # Only an actually running persisted execution belongs in the
+        # Live Pipeline Execution panel. Terminal runs must never be
+        # reconstructed as an active pipeline.
+        if persisted_status == "running":
+            if current_runtime is None:
+                runtime_state.recover_run(latest_run_id)
 
-        live_flow.render(latest_run_id)
+            live_flow.render(latest_run_id)
 
     total_runs = len(runs)
     success_runs, failed_runs, running_runs = _status_counts(runs)

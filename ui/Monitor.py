@@ -1,4 +1,4 @@
-﻿"""DataDoctorAI Monitor ? operational health, alerts and real self-healing repair."""
+"""DataDoctorAI Monitor ? operational health, alerts and real self-healing repair."""
 from __future__ import annotations
 
 import json
