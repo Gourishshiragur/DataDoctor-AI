@@ -491,16 +491,61 @@ def _run_orchestrated_pipeline(
 
 
 
-def _render_persistent_databricks_status(restored: dict):
-    """Render a navigation-safe live view from durable Databricks state.
 
-    This renderer deliberately does NOT depend on Streamlit session_state
-    DataFrames. Databricks owns the real execution; Studio only reconstructs
-    the visible state after a page navigation/rerun.
-    """
+def _get_databricks_stage_status(run_id: str, mode: str):
+    """Read the authoritative live stage from the Databricks status Delta table."""
+    try:
+        from dbx_enterprise import connection
+        from config.settings import get_databricks_config, load_settings
+
+        settings = load_settings()
+        cfg = get_databricks_config(settings, mode)
+
+        catalog = cfg.get("catalog", "main")
+        schema = cfg.get("schema", "default")
+
+        safe_run_id = str(run_id).replace("'", "''")
+
+        sql = f"""
+            SELECT
+                run_id,
+                dataset,
+                stage,
+                state,
+                rows_in,
+                rows_out,
+                message,
+                updated_at
+            FROM `{catalog}`.`{schema}`.`datadoctor_pipeline_status`
+            WHERE run_id = '{safe_run_id}'
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """
+
+        # Use the existing Databricks SQL connection layer.
+        result = connection.execute_query(sql, mode=mode)
+
+        if result is None:
+            return None
+
+        if hasattr(result, "to_dict"):
+            rows = result.to_dict("records")
+        elif isinstance(result, list):
+            rows = result
+        else:
+            rows = []
+
+        return rows[0] if rows else None
+
+    except Exception:
+        return None
+
+
+def _render_persistent_databricks_status(restored: dict):
+    """Render a premium navigation-safe Databricks execution view."""
+
     import json
 
-    run_id = str(restored.get("run_id") or "")
     summary = restored.get("summary") or {}
 
     if isinstance(summary, str):
@@ -510,6 +555,7 @@ def _render_persistent_databricks_status(restored: dict):
             summary = {}
 
     dbx_status = restored.get("_dbx_status") or {}
+
     dbx_run_id = str(
         dbx_status.get("run_id")
         or summary.get("dbx_run_id")
@@ -520,180 +566,458 @@ def _render_persistent_databricks_status(restored: dict):
         dbx_status.get("life_cycle_state")
         or "RUNNING"
     )
+
+    result_state = str(
+        dbx_status.get("result_state")
+        or ""
+    )
+
     state_message = str(
         dbx_status.get("state_message")
         or ""
     )
 
+    lifecycle_upper = lifecycle.upper()
+
+    if lifecycle_upper in ("TERMINATED", "SKIPPED"):
+        if result_state.upper() == "SUCCESS":
+            active_stage = "gold"
+        else:
+            active_stage = "quality"
+    else:
+        active_stage = "bronze"
+
     st.divider()
-    st.subheader("? Live Pipeline Execution")
 
-    st.info(
-        f"Databricks Spark Job **{dbx_run_id}** is running independently. "
-        "You can navigate between Dashboard, Monitor and Studio without "
-        "cancelling the pipeline."
-    )
-
-    # CSS animation is purely visual. It is NOT the execution mechanism.
     components.html(
-        """
+        f"""
         <style>
-        .ddx-live-wrap {
-            padding: 14px 4px 8px 4px;
-        }
 
-        .ddx-live-header {
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            background: transparent;
+            font-family:
+                Inter,
+                ui-sans-serif,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }}
+
+        .dd-shell {{
+            position: relative;
+            width: 100%;
+            min-height: 245px;
+            padding: 22px 20px 18px;
+            overflow: hidden;
+            border: 1px solid rgba(148,163,184,.20);
+            border-radius: 22px;
+            background:
+                radial-gradient(
+                    circle at 15% 20%,
+                    rgba(56,189,248,.12),
+                    transparent 28%
+                ),
+                radial-gradient(
+                    circle at 85% 80%,
+                    rgba(168,85,247,.12),
+                    transparent 30%
+                ),
+                linear-gradient(
+                    135deg,
+                    rgba(15,23,42,.88),
+                    rgba(30,41,59,.72)
+                );
+            box-shadow:
+                0 18px 45px rgba(0,0,0,.22),
+                inset 0 1px 0 rgba(255,255,255,.08);
+            backdrop-filter: blur(18px);
+        }}
+
+        .dd-shell::before {{
+            content: "";
+            position: absolute;
+            width: 280px;
+            height: 280px;
+            left: -100px;
+            top: -170px;
+            border-radius: 50%;
+            background: rgba(56,189,248,.08);
+            filter: blur(45px);
+            animation: dd-float 7s ease-in-out infinite;
+        }}
+
+        .dd-shell::after {{
+            content: "";
+            position: absolute;
+            width: 260px;
+            height: 260px;
+            right: -90px;
+            bottom: -160px;
+            border-radius: 50%;
+            background: rgba(168,85,247,.08);
+            filter: blur(45px);
+            animation: dd-float 8s ease-in-out infinite reverse;
+        }}
+
+        @keyframes dd-float {{
+            0%,100% {{
+                transform: translate3d(0,0,0) scale(1);
+            }}
+            50% {{
+                transform: translate3d(35px,18px,0) scale(1.12);
+            }}
+        }}
+
+        .dd-top {{
+            position: relative;
+            z-index: 2;
             display: flex;
             align-items: center;
-            gap: 10px;
-            font-family: sans-serif;
-            font-size: 15px;
-            font-weight: 600;
-            margin-bottom: 16px;
-        }
+            justify-content: space-between;
+            margin-bottom: 22px;
+        }}
 
-        .ddx-dot {
+        .dd-brand {{
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }}
+
+        .dd-live-dot {{
             width: 10px;
             height: 10px;
             border-radius: 50%;
             background: #22c55e;
-            animation: ddx-pulse 1.2s infinite;
-        }
+            box-shadow:
+                0 0 0 4px rgba(34,197,94,.10),
+                0 0 18px rgba(34,197,94,.75);
+            animation: dd-pulse 1.5s ease-in-out infinite;
+        }}
 
-        @keyframes ddx-pulse {
-            0%, 100% { opacity: .35; transform: scale(.85); }
-            50% { opacity: 1; transform: scale(1.15); }
-        }
+        @keyframes dd-pulse {{
+            0%,100% {{
+                transform: scale(.8);
+                opacity: .65;
+            }}
+            50% {{
+                transform: scale(1.15);
+                opacity: 1;
+            }}
+        }}
 
-        .ddx-track {
+        .dd-title {{
+            color: #f8fafc;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: .02em;
+        }}
+
+        .dd-subtitle {{
+            margin-top: 3px;
+            color: #94a3b8;
+            font-size: 11px;
+        }}
+
+        .dd-live {{
+            padding: 6px 11px;
+            border: 1px solid rgba(34,197,94,.25);
+            border-radius: 999px;
+            background: rgba(34,197,94,.08);
+            color: #86efac;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .08em;
+        }}
+
+        .dd-pipeline {{
+            position: relative;
+            z-index: 2;
             display: flex;
             align-items: center;
             width: 100%;
-            gap: 0;
-        }
+        }}
 
-        .ddx-stage {
+        .dd-stage {{
+            position: relative;
             flex: 1;
+            min-width: 58px;
             text-align: center;
-            font-family: sans-serif;
-        }
+        }}
 
-        .ddx-node {
-            width: 54px;
-            height: 54px;
-            border-radius: 50%;
+        .dd-icon {{
+            position: relative;
+            width: 48px;
+            height: 48px;
             margin: auto;
             display: flex;
             align-items: center;
             justify-content: center;
-            border: 2px solid #f97316;
-            background: rgba(249,115,22,.12);
-            font-size: 21px;
-            animation: ddx-glow 1.8s infinite;
-        }
+            border: 1px solid rgba(148,163,184,.22);
+            border-radius: 15px;
+            background: rgba(15,23,42,.72);
+            color: #64748b;
+            font-size: 15px;
+            font-weight: 800;
+            box-shadow:
+                inset 0 1px 0 rgba(255,255,255,.05),
+                0 8px 20px rgba(0,0,0,.16);
+            transition: all .35s ease;
+        }}
 
-        @keyframes ddx-glow {
-            0%, 100% { box-shadow: 0 0 0 rgba(249,115,22,0); }
-            50% { box-shadow: 0 0 18px rgba(249,115,22,.35); }
-        }
+        .dd-stage.complete .dd-icon {{
+            border-color: rgba(34,197,94,.42);
+            background: rgba(34,197,94,.10);
+            color: #86efac;
+        }}
 
-        .ddx-label {
-            margin-top: 7px;
-            color: #cbd5e1;
-            font-size: 12px;
-        }
+        .dd-stage.active .dd-icon {{
+            border-color: rgba(56,189,248,.65);
+            background:
+                radial-gradient(
+                    circle,
+                    rgba(56,189,248,.20),
+                    rgba(15,23,42,.78)
+                );
+            color: #7dd3fc;
+            box-shadow:
+                0 0 0 5px rgba(56,189,248,.06),
+                0 0 28px rgba(56,189,248,.28),
+                inset 0 1px 0 rgba(255,255,255,.10);
+            animation: dd-active 1.8s ease-in-out infinite;
+        }}
 
-        .ddx-line {
-            flex: .7;
-            height: 2px;
-            background: #475569;
-            position: relative;
-            overflow: hidden;
-        }
+        @keyframes dd-active {{
+            0%,100% {{
+                transform: translateY(0);
+            }}
+            50% {{
+                transform: translateY(-4px);
+            }}
+        }}
 
-        .ddx-line:after {
+        .dd-stage.active .dd-icon::before {{
             content: "";
             position: absolute;
-            left: -30%;
+            inset: -7px;
+            border: 1px solid rgba(56,189,248,.25);
+            border-radius: 19px;
+            animation: dd-ring 2s ease-out infinite;
+        }}
+
+        @keyframes dd-ring {{
+            0% {{
+                transform: scale(.75);
+                opacity: .8;
+            }}
+            100% {{
+                transform: scale(1.3);
+                opacity: 0;
+            }}
+        }}
+
+        .dd-name {{
+            margin-top: 9px;
+            color: #cbd5e1;
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: .06em;
+        }}
+
+        .dd-detail {{
+            margin-top: 3px;
+            color: #64748b;
+            font-size: 8px;
+            letter-spacing: .05em;
+        }}
+
+        .dd-connector {{
+            position: relative;
+            flex: .55;
+            height: 2px;
+            margin: 0 3px;
+            overflow: hidden;
+            background: rgba(100,116,139,.25);
+        }}
+
+        .dd-connector::after {{
+            content: "";
+            position: absolute;
             top: 0;
-            width: 30%;
+            left: -35%;
+            width: 35%;
             height: 100%;
-            background: #f97316;
-            animation: ddx-flow 1.4s linear infinite;
-        }
+            background:
+                linear-gradient(
+                    90deg,
+                    transparent,
+                    #38bdf8,
+                    transparent
+                );
+            box-shadow: 0 0 10px #38bdf8;
+            animation: dd-flow 1.5s linear infinite;
+        }}
 
-        @keyframes ddx-flow {
-            from { left: -30%; }
-            to { left: 100%; }
-        }
+        @keyframes dd-flow {{
+            from {{
+                left: -35%;
+            }}
+            to {{
+                left: 110%;
+            }}
+        }}
 
-        .ddx-meta {
-            margin-top: 15px;
+        .dd-footer {{
+            position: relative;
+            z-index: 2;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 24px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(148,163,184,.10);
+            color: #64748b;
+            font-size: 9px;
+        }}
+
+        .dd-footer-live {{
+            display: flex;
+            align-items: center;
+            gap: 7px;
             color: #94a3b8;
-            font-family: sans-serif;
-            font-size: 12px;
-        }
+        }}
+
+        .dd-mini {{
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #22c55e;
+            box-shadow: 0 0 9px rgba(34,197,94,.8);
+        }}
+
         </style>
 
-        <div class="ddx-live-wrap">
-          <div class="ddx-live-header">
-            <span class="ddx-dot"></span>
-            <span>Databricks Spark execution is active</span>
-          </div>
+        <div class="dd-shell">
 
-          <div class="ddx-track">
-            <div class="ddx-stage">
-              <div class="ddx-node">??</div>
-              <div class="ddx-label">Uploaded</div>
+            <div class="dd-top">
+
+                <div class="dd-brand">
+                    <span class="dd-live-dot"></span>
+
+                    <div>
+                        <div class="dd-title">
+                            DataDoctor AI · Live Pipeline
+                        </div>
+
+                        <div class="dd-subtitle">
+                            Remote Spark execution · navigation safe
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dd-live">
+                    ● LIVE
+                </div>
+
             </div>
 
-            <div class="ddx-line"></div>
+            <div class="dd-pipeline">
 
-            <div class="ddx-stage">
-              <div class="ddx-node">??</div>
-              <div class="ddx-label">Bronze</div>
+                <div class="dd-stage complete">
+                    <div class="dd-icon">↥</div>
+                    <div class="dd-name">UPLOADED</div>
+                    <div class="dd-detail">SOURCE</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'bronze' else 'complete'}">
+                    <div class="dd-icon">B</div>
+                    <div class="dd-name">BRONZE</div>
+                    <div class="dd-detail">INGEST</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'profiling' else ('complete' if active_stage in ('quality','repair','silver','gold') else '')}">
+                    <div class="dd-icon">P</div>
+                    <div class="dd-name">PROFILING</div>
+                    <div class="dd-detail">ANALYZE</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'quality' else ('complete' if active_stage in ('repair','silver','gold') else '')}">
+                    <div class="dd-icon">Q</div>
+                    <div class="dd-name">QUALITY</div>
+                    <div class="dd-detail">VALIDATE</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'repair' else ('complete' if active_stage in ('silver','gold') else '')}">
+                    <div class="dd-icon">AI</div>
+                    <div class="dd-name">AI REPAIR</div>
+                    <div class="dd-detail">REMEDIATE</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'silver' else ('complete' if active_stage == 'gold' else '')}">
+                    <div class="dd-icon">S</div>
+                    <div class="dd-name">SILVER</div>
+                    <div class="dd-detail">CLEAN</div>
+                </div>
+
+                <div class="dd-connector"></div>
+
+                <div class="dd-stage {'active' if active_stage == 'gold' else ''}">
+                    <div class="dd-icon">G</div>
+                    <div class="dd-name">GOLD</div>
+                    <div class="dd-detail">SERVE</div>
+                </div>
+
             </div>
 
-            <div class="ddx-line"></div>
+            <div class="dd-footer">
 
-            <div class="ddx-stage">
-              <div class="ddx-node">??</div>
-              <div class="ddx-label">Quality</div>
+                <div class="dd-footer-live">
+                    <span class="dd-mini"></span>
+                    <span>Databricks Spark execution active</span>
+                </div>
+
+                <span>Run {dbx_run_id}</span>
+
             </div>
 
-            <div class="ddx-line"></div>
-
-            <div class="ddx-stage">
-              <div class="ddx-node">???</div>
-              <div class="ddx-label">Repair</div>
-            </div>
-
-            <div class="ddx-line"></div>
-
-            <div class="ddx-stage">
-              <div class="ddx-node">??</div>
-              <div class="ddx-label">Silver</div>
-            </div>
-
-            <div class="ddx-line"></div>
-
-            <div class="ddx-stage">
-              <div class="ddx-node">??</div>
-              <div class="ddx-label">Gold</div>
-            </div>
-          </div>
         </div>
         """,
-        height=155,
+        height=245,
     )
 
-    st.caption(
-        f"Databricks run: `{dbx_run_id}` ? lifecycle: **{lifecycle}**"
-        + (f" ? {state_message}" if state_message else "")
-    )
+    if lifecycle_upper in ("TERMINATED", "SKIPPED"):
+        if result_state.upper() == "SUCCESS":
+            st.success(
+                f"Databricks run `{dbx_run_id}` completed successfully."
+            )
+        else:
+            st.warning(
+                f"Databricks run `{dbx_run_id}` finished with state "
+                f"`{result_state or lifecycle}`."
+            )
 
-    run_page_url = dbx_status.get("run_page_url") or summary.get(
-        "databricks_run_page_url"
+    if state_message:
+        st.caption(state_message)
+
+    run_page_url = (
+        dbx_status.get("run_page_url")
+        or summary.get("databricks_run_page_url")
     )
 
     if run_page_url:
@@ -704,78 +1028,64 @@ def _render_persistent_databricks_status(restored: dict):
 
 
 def _restore_persistent_databricks_run(dataset_name: str, mode: str):
-    """
-    Restore the latest persisted Databricks execution into Streamlit state.
-
-    Streamlit reruns when the user changes pages. Therefore the live pipeline
-    MUST NOT depend on st.session_state surviving navigation.
-
-    SQLite history is authoritative for the internal run and contains the real
-    Databricks run ID. Databricks itself remains the execution owner.
-    """
+    """Restore the newest Databricks run and authoritative stage state."""
     import json
 
     try:
         runs = history.get_runs(limit=25)
-
         for run in runs:
             if str(run.get("dataset") or "") != str(dataset_name):
                 continue
 
             summary = run.get("summary") or {}
-
             if isinstance(summary, str):
                 try:
                     summary = json.loads(summary)
                 except Exception:
                     continue
-
             if not isinstance(summary, dict):
                 continue
 
             dbx_run_id = summary.get("dbx_run_id")
-            run_mode = summary.get("mode") or mode
-
             if not dbx_run_id:
                 continue
 
-            status = str(run.get("status") or "").lower()
-
-            # Terminal runs are still useful for showing the final result,
-            # but they must never be rendered as an active animation.
-            if status in {"success", "failed", "cancelled"}:
-                st.session_state.last_run_id = run["run_id"]
-                st.session_state.active_databricks_run_id = None
-                return run
-
-            if status != "running":
-                continue
-
-            # Restore the persistent internal identity first.
+            run_mode = summary.get("mode") or mode
             st.session_state.last_run_id = run["run_id"]
             st.session_state.active_dataset = dataset_name
-            st.session_state.active_databricks_run_id = str(dbx_run_id)
 
-            # Check Databricks exactly once on this Streamlit rerun.
             try:
                 from dbx_enterprise import jobs as dbx_jobs
+                dbx_status = dbx_jobs.get_run_status(str(dbx_run_id), mode=run_mode)
+            except Exception as exc:
+                st.session_state.active_databricks_run_id = str(dbx_run_id)
+                return {
+                    **run,
+                    "summary": summary,
+                    "_dbx_status": {
+                        "run_id": str(dbx_run_id),
+                        "life_cycle_state": "RUNNING",
+                        "result_state": "",
+                        "state_message": f"Databricks status temporarily unavailable: {exc}",
+                    },
+                    "_live": str(run.get("status") or "").lower() == "running",
+                    "_dbx_unreachable": True,
+                }
 
-                dbx_status = dbx_jobs.get_run_status(
-                    str(dbx_run_id),
-                    mode=run_mode,
-                )
+            lifecycle = str(dbx_status.get("life_cycle_state") or "").upper()
+            result = str(dbx_status.get("result_state") or "").upper()
 
-                lifecycle = dbx_status.get("life_cycle_state")
-                result = dbx_status.get("result_state")
+            if lifecycle in {"PENDING", "RUNNING"}:
+                st.session_state.active_databricks_run_id = str(dbx_run_id)
+                return {
+                    **run,
+                    "summary": summary,
+                    "_dbx_status": dbx_status,
+                    "_live": True,
+                }
 
-                if lifecycle in ("PENDING", "RUNNING"):
-                    return {
-                        **run,
-                        "_dbx_status": dbx_status,
-                        "_live": True,
-                    }
-
-                if lifecycle == "TERMINATED" and result == "SUCCESS":
+            if lifecycle == "TERMINATED" and result == "SUCCESS":
+                if str(run.get("status") or "").lower() != "success":
                     history.finish_run(
                         run["run_id"],
                         "success",
@@ -783,30 +1093,25 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                             **summary,
                             "result_state": result,
                             "life_cycle_state": lifecycle,
-                            "databricks_run_page_url":
-                                dbx_status.get("run_page_url", ""),
+                            "databricks_run_page_url": dbx_status.get("run_page_url", ""),
                         },
                     )
-                    st.session_state.active_databricks_run_id = None
+                st.session_state.active_databricks_run_id = None
+                return {
+                    **run,
+                    "summary": summary,
+                    "status": "success",
+                    "_dbx_status": dbx_status,
+                    "_live": False,
+                }
 
-                    return {
-                        **run,
-                        "status": "success",
-                        "_dbx_status": dbx_status,
-                        "_live": False,
-                    }
-
-                if lifecycle in {
-                    "TERMINATED",
-                    "SKIPPED",
-                    "INTERNAL_ERROR",
-                }:
-                    error = (
-                        dbx_status.get("error_message")
-                        or dbx_status.get("state_message")
-                        or "Databricks job failed"
-                    )
-
+            if lifecycle in {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}:
+                error = (
+                    dbx_status.get("error_message")
+                    or dbx_status.get("state_message")
+                    or "Databricks job failed"
+                )
+                if str(run.get("status") or "").lower() != "failed":
                     history.finish_run(
                         run["run_id"],
                         "failed",
@@ -816,31 +1121,19 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                             "error": error,
                             "result_state": result,
                             "life_cycle_state": lifecycle,
-                            "databricks_run_page_url":
-                                dbx_status.get("run_page_url", ""),
+                            "databricks_run_page_url": dbx_status.get("run_page_url", ""),
                         },
                     )
-
-                    st.session_state.active_databricks_run_id = None
-
-                    return {
-                        **run,
-                        "status": "failed",
-                        "_dbx_status": dbx_status,
-                        "_live": False,
-                    }
-
-            except Exception:
-                # Do NOT mark the Databricks job failed merely because the
-                # Studio page temporarily cannot reach Databricks.
+                st.session_state.active_databricks_run_id = None
                 return {
                     **run,
-                    "_live": True,
-                    "_dbx_unreachable": True,
+                    "summary": summary,
+                    "status": "failed",
+                    "_dbx_status": dbx_status,
+                    "_live": False,
                 }
 
         return None
-
     except Exception:
         return None
 
@@ -848,7 +1141,7 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
 def render():
     st.title("🧪 Pipeline Studio")
     st.caption(
-        "Ingest a dataset and watch it self-heal live: Bronze → Quality Check → Repair → Silver → Gold."
+        "Ingest a dataset and watch it self-heal live: Bronze → Profiling → Quality → AI Repair → Silver → Gold."
     )
 
     dataset_name, df = dataset_picker(key_prefix="studio")
@@ -856,32 +1149,40 @@ def render():
         st.stop()
 
     st.session_state.active_dataset = dataset_name
+    mode = current_mode(load_settings())
 
-    # Every Studio page render attempts to restore the persistent execution.
-    # This survives Streamlit navigation/reruns.
-    try:
-        restored = _restore_persistent_databricks_run(
-            dataset_name,
-            current_mode(load_settings()),
+    restored = _restore_persistent_databricks_run(dataset_name, mode)
+
+    if restored:
+        st.session_state.last_run_id = restored["run_id"]
+        st.session_state.active_dataset = dataset_name
+
+        dbx_status = restored.get("_dbx_status") or {}
+        dbx_run_id = str(
+            dbx_status.get("run_id")
+            or (restored.get("summary") or {}).get("dbx_run_id")
+            or ""
         )
+        st.session_state.active_databricks_run_id = dbx_run_id or None
 
-        if restored and restored.get("_live"):
-            st.session_state.last_run_id = restored["run_id"]
-            st.session_state.active_dataset = dataset_name
-            st.session_state.active_databricks_run_id = str(
-                restored.get("_dbx_status", {}).get(
-                    "run_id",
-                    restored.get("dbx_run_id", ""),
-                )
-            )
+        # Render both RUNNING and terminal states. The renderer reads the
+        # authoritative datadoctor_pipeline_status Delta table.
+        _render_persistent_databricks_status(restored)
 
-            # IMPORTANT:
-            # Streamlit navigation destroys the previous page render.
-            # The Databricks job continues independently, so restore the
-            # visible running state from durable history.
-            _render_persistent_databricks_status(restored)
-    except Exception:
-        pass
+        # On SUCCESS, load the real Bronze/Silver/Gold Spark tables once.
+        if str(restored.get("status") or "").lower() == "success":
+            loaded_for = st.session_state.get("_dbx_results_loaded_for")
+            if loaded_for != restored["run_id"]:
+                try:
+                    _populate_results_from_databricks(dataset_name, mode, restored["run_id"])
+                    st.session_state["_dbx_results_loaded_for"] = restored["run_id"]
+                except Exception as exc:
+                    st.warning(f"Databricks completed, but result tables are not readable yet: {exc}")
+
+        # This is real polling, not a fake stage animation.
+        if restored.get("_live"):
+            time.sleep(1.0)
+            st.rerun()
 
     data_volume_bytes = df.memory_usage(deep=True).sum()
 
@@ -897,29 +1198,19 @@ def render():
         help="Uses your configured AI provider for a one-line rationale per repair; falls back to a canned note if none is configured.",
     )
 
-    settings = load_settings()
-    mode = current_mode(settings)
-    databricks_ready = is_databricks_configured(settings, mode)
+    databricks_ready = is_databricks_configured(load_settings(), mode)
     if databricks_ready:
         st.caption(
-            f"⚡ Will orchestrate via **Databricks** ({mode.title()} workspace, real Spark) — "
-            "falls back to the in-app pipeline if the Job fails."
+            f"⚡ Primary orchestration: **Databricks** ({mode.title()} workspace, real Spark) — "
+            "the primary Run Pipeline path submits exactly one Databricks run."
         )
-        button_label = "▶️ Run Pipeline"
     else:
-        st.caption(
-            "💾 No Databricks configured for this mode — running the in-app pipeline directly."
-        )
-        button_label = "▶️ Run Pipeline"
+        st.caption("💾 No Databricks configured for this mode — running the in-app pipeline directly.")
 
-    st.caption(
-        f"DataDoctorAI orchestration ? {mode.title()} workspace ? "
-        "Databricks with DuckDB fallback when unavailable."
-    )
-
-    if st.button(button_label, type="primary", use_container_width=True):
+    if st.button("▶️ Run Pipeline", type="primary", use_container_width=True):
         if databricks_ready:
             _run_orchestrated_pipeline(dataset_name, df, mode, explain_toggle)
+            st.rerun()
         else:
             run_id = history.new_run(dataset_name)
             runtime_state.create_run(run_id, dataset_name, mode="demo")
@@ -933,6 +1224,7 @@ def render():
         st.divider()
         _render_results(dataset_name)
 
+    # Explicit/manual native path remains separate from primary Run Pipeline.
     _render_databricks_job_section(dataset_name, df)
 
 

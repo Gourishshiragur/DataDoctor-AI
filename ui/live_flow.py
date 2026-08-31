@@ -7,7 +7,6 @@ import streamlit as st
 
 from pipeline import runtime_state
 
-
 LABELS = {
     "source": "SOURCE",
     "bronze": "BRONZE",
@@ -42,9 +41,7 @@ def _packets(info: dict) -> str:
     count = min(7, max(3, rows // 1000 + 3)) if rows else 3
 
     return (
-        '<div class="dd-packets">'
-        + "".join('<i></i>' for _ in range(count))
-        + "</div>"
+        '<div class="dd-packets">' + "".join("<i></i>" for _ in range(count)) + "</div>"
     )
 
 
@@ -52,7 +49,8 @@ def render(run_id: str | None = None):
     run = runtime_state.get_run(run_id) if run_id else None
 
     if not run:
-        st.html("""
+        st.html(
+            """
             <div class="dd-live">
                 <div class="dd-live-title">Live Pipeline Execution</div>
                 <div class="dd-live-sub">Waiting for an active run</div>
@@ -91,8 +89,7 @@ def render(run_id: str | None = None):
 
         message = html.escape(str(info.get("message") or ""))[:65]
 
-        cards.append(
-            f"""
+        cards.append(f"""
             <div class="dd-stage {css}">
                 <div class="dd-stage-name">{LABELS[stage]}</div>
                 <div class="dd-stage-state">{html.escape(str(state).upper())}</div>
@@ -100,8 +97,7 @@ def render(run_id: str | None = None):
                 <div class="dd-stage-rows">{rows}</div>
                 <div class="dd-stage-message">{message}</div>
             </div>
-            """
-        )
+            """)
 
         if index < len(runtime_state.STAGES) - 1:
             next_stage = runtime_state.STAGES[index + 1]
@@ -110,9 +106,7 @@ def render(run_id: str | None = None):
             connection = (
                 "flowing"
                 if state == "success" and next_state in ACTIVE
-                else "failed"
-                if next_state == "failed"
-                else ""
+                else "failed" if next_state == "failed" else ""
             )
 
             cards.append(f'<div class="dd-connector {connection}"></div>')
@@ -130,15 +124,18 @@ def render(run_id: str | None = None):
         badge = f"● {status}"
         badge_class = status.lower()
 
-    st.html(f"""
+    st.html(
+        f"""
 <style>
 .dd-live {{
     margin:18px 0;
     padding:18px;
-    border:1px solid rgba(148,163,184,.16);
+    border:1px solid rgba(148,163,184,.22);
     border-radius:20px;
-    background:linear-gradient(145deg,rgba(15,23,42,.98),rgba(17,24,39,.95));
-    box-shadow:0 14px 35px rgba(0,0,0,.18);
+    background:linear-gradient(145deg,rgba(30,41,59,.55),rgba(15,23,42,.65));
+    backdrop-filter:blur(18px) saturate(160%);
+    -webkit-backdrop-filter:blur(18px) saturate(160%);
+    box-shadow:0 14px 40px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.06);
 }}
 
 .dd-live-head {{
@@ -183,17 +180,43 @@ def render(run_id: str | None = None):
     min-height:105px;
     padding:12px;
     border-radius:14px;
-    border:1px solid rgba(148,163,184,.12);
-    background:rgba(30,41,59,.62);
+    border:1px solid rgba(148,163,184,.16);
+    background:rgba(255,255,255,.045);
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
     overflow:hidden;
+    transition:border-color .3s ease, box-shadow .3s ease;
 }}
 
 .dd-stage.waiting {{ opacity:.42; }}
-.dd-stage.complete {{ border-color:rgba(74,222,128,.32); }}
+.dd-stage.complete {{ border-color:rgba(74,222,128,.4); background:rgba(74,222,128,.05); }}
 
 .dd-stage.active {{
-    border-color:rgba(96,165,250,.75);
-    box-shadow:0 0 24px rgba(59,130,246,.18);
+    border-color:rgba(96,165,250,.85);
+    background:rgba(96,165,250,.08);
+    box-shadow:0 0 28px rgba(59,130,246,.28), inset 0 1px 0 rgba(255,255,255,.08);
+    animation:dd-glass-pulse 2.2s ease-in-out infinite;
+}}
+
+.dd-stage.active::before {{
+    content:"";
+    position:absolute;
+    inset:0;
+    background:linear-gradient(120deg, transparent 30%, rgba(255,255,255,.10) 50%, transparent 70%);
+    background-size:220% 100%;
+    animation:dd-glass-sheen 2.4s ease-in-out infinite;
+    pointer-events:none;
+}}
+
+@keyframes dd-glass-pulse {{
+    0%, 100% {{ box-shadow:0 0 28px rgba(59,130,246,.28), inset 0 1px 0 rgba(255,255,255,.08); }}
+    50%      {{ box-shadow:0 0 40px rgba(59,130,246,.45), inset 0 1px 0 rgba(255,255,255,.12); }}
+}}
+
+@keyframes dd-glass-sheen {{
+    0%   {{ background-position:130% 0; }}
+    100% {{ background-position:-30% 0; }}
 }}
 
 .dd-stage.failed {{
