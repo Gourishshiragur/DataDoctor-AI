@@ -111,8 +111,45 @@ def render(run_id: str | None = None):
 
             cards.append(f'<div class="dd-connector {connection}"></div>')
 
+    # Live metrics come from the authoritative stage state.
     metrics = run.get("metrics", {})
+
+    source_info = stages.get("source", {})
+    bronze_info = stages.get("bronze", {})
+    quality_info = stages.get("quality", {})
+    repair_info = stages.get("repair", {})
+    silver_info = stages.get("silver", {})
+    gold_info = stages.get("gold", {})
+
+    input_rows = int(
+        source_info.get("rows_out")
+        or source_info.get("rows_in")
+        or bronze_info.get("rows_in")
+        or 0
+    )
+
+    output_rows = int(
+        gold_info.get("rows_out")
+        or silver_info.get("rows_out")
+        or bronze_info.get("rows_out")
+        or 0
+    )
+
     quality = metrics.get("quality_score")
+
+    repair_count = int(
+        repair_info.get("repair_count")
+        or repair_info.get("repairs")
+        or metrics.get("repairs")
+        or 0
+    )
+
+    failed_checks = int(
+        quality_info.get("failed_checks")
+        or quality_info.get("failed_count")
+        or metrics.get("failed_checks")
+        or 0
+    )
     quality_text = f"{float(quality):.0f}/100" if quality is not None else "—"
 
     status = str(run.get("status", "running")).upper()
@@ -359,11 +396,11 @@ def render(run_id: str | None = None):
     </div>
 
     <div class="dd-metrics">
-        <div class="dd-metric">Input <b>{int(metrics.get("rows_in") or 0):,}</b></div>
-        <div class="dd-metric">Output <b>{int(metrics.get("rows_out") or 0):,}</b></div>
+        <div class="dd-metric">Input <b>{input_rows:,}</b></div>
+        <div class="dd-metric">Output <b>{output_rows:,}</b></div>
         <div class="dd-metric">Quality <b>{quality_text}</b></div>
-        <div class="dd-metric">Repairs <b>{int(metrics.get("repairs") or 0):,}</b></div>
-        <div class="dd-metric">Failed checks <b>{int(metrics.get("failed_checks") or 0):,}</b></div>
+        <div class="dd-metric">Repairs <b>{repair_count:,}</b></div>
+        <div class="dd-metric">Failed checks <b>{failed_checks:,}</b></div>
     </div>
 </div>
 """,

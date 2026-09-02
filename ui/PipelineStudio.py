@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+
 """ui/PipelineStudio.py — the heart of the app: upload/select a dataset and watch it
 flow live through Bronze -> Quality Checks -> Self-Healing Repair -> Silver ->
 Quality Re-check -> Gold, with every step streamed to the screen as it happens.
@@ -21,6 +22,7 @@ from pipeline import runtime_state
 from storage import manager as storage_manager
 from storage import router as storage_router
 from ui._common import dataset_picker, score_color
+from ui import live_flow
 
 
 def _backend_badge():
@@ -267,15 +269,9 @@ def _populate_results_from_databricks(dataset_name: str, mode: str, run_id: str)
 
     # Native Spark Job writes these tables into the active mode's configured
     # catalog/schema using the bronze/silver/gold prefixes passed as Job parameters.
-    bronze_tbl = dbx_connection.read_table(
-        "bronze", dataset_name, mode=mode
-    )
-    silver_tbl = dbx_connection.read_table(
-        "silver", dataset_name, mode=mode
-    )
-    gold_tbl = dbx_connection.read_table(
-        "gold", dataset_name, mode=mode
-    )
+    bronze_tbl = dbx_connection.read_table("bronze", dataset_name, mode=mode)
+    silver_tbl = dbx_connection.read_table("silver", dataset_name, mode=mode)
+    gold_tbl = dbx_connection.read_table("gold", dataset_name, mode=mode)
 
     # Durable audit trail: all three layers were served by Databricks.
     for layer in ("bronze", "silver", "gold"):
@@ -303,15 +299,14 @@ def _populate_results_from_databricks(dataset_name: str, mode: str, run_id: str)
         "kpis": {},
         "group_column": None,
     }
-    st.session_state.active_dataset = dataset_name
     st.session_state.last_run_id = run_id
+    st.session_state["_dbx_result_dataset"] = dataset_name
 
     return {
         "bronze_rows": len(bronze_tbl),
         "silver_rows": len(silver_tbl),
         "gold_rows": len(gold_tbl),
     }
-
 
 
 # A module-level executor is intentionally used here.
@@ -434,6 +429,7 @@ def _run_orchestrated_pipeline(
 
     internal_run_id = history.new_run(dataset_name)
     st.session_state.last_run_id = internal_run_id
+    st.session_state["_active_dbx_internal_run_id"] = internal_run_id
 
     initial_summary = {
         "engine": "databricks",
@@ -490,10 +486,9 @@ def _run_orchestrated_pipeline(
     )
 
 
-
-
 def _get_databricks_stage_status(run_id: str, mode: str):
-    """Read the authoritative live stage from the Databricks status Delta table."""
+    """Read authoritative Databricks stage state for every pipeline stage."""
+
     try:
         from dbx_enterprise import connection
         from config.settings import get_databricks_config, load_settings
@@ -518,27 +513,97 @@ def _get_databricks_stage_status(run_id: str, mode: str):
                 updated_at
             FROM `{catalog}`.`{schema}`.`datadoctor_pipeline_status`
             WHERE run_id = '{safe_run_id}'
-            ORDER BY updated_at DESC
-            LIMIT 1
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY stage
+                ORDER BY updated_at DESC
+            ) = 1
+            ORDER BY updated_at ASC
         """
 
-        # Use the existing Databricks SQL connection layer.
-        result = connection.execute_query(sql, mode=mode)
+        result = connection.run_sql(sql, mode=mode)
 
         if result is None:
-            return None
+            return []
 
         if hasattr(result, "to_dict"):
-            rows = result.to_dict("records")
-        elif isinstance(result, list):
-            rows = result
-        else:
-            rows = []
+            return result.to_dict("records")
 
-        return rows[0] if rows else None
+        if isinstance(result, list):
+            return result
+
+        return []
 
     except Exception:
-        return None
+        return []
+
+
+def _sync_databricks_runtime_state(restored: dict) -> bool:
+    """Project authoritative Databricks stage rows into the shared runtime state.
+
+    Dashboard and Studio then render the exact same live_flow component. The
+    Databricks status Delta table remains authoritative; runtime_state is only
+    the UI projection used by live_flow.
+    """
+    run_id = str(restored.get("run_id") or "")
+    if not run_id:
+        return False
+
+    summary = restored.get("summary") or {}
+    dataset = str(restored.get("dataset") or summary.get("dataset") or "")
+    mode = str(summary.get("mode") or restored.get("mode") or "demo")
+    if not dataset:
+        return False
+
+    try:
+        current = runtime_state.get_run(run_id)
+        if current is None:
+            current = runtime_state.create_run(run_id, dataset, mode=mode)
+
+        rows = _get_databricks_stage_status(run_id, mode)
+        if not rows:
+            # Keep the existing runtime state during a brief status-table lag.
+            return runtime_state.get_run(run_id) is not None
+
+        for row in rows:
+            stage = str(row.get("stage") or "").strip().lower()
+            if stage not in runtime_state.STAGES:
+                continue
+            state = str(row.get("state") or "waiting").strip().lower()
+            if state not in runtime_state.STATES:
+                state = "waiting"
+            runtime_state.update_stage(
+                run_id,
+                stage,
+                state,
+                rows_in=int(row.get("rows_in") or 0),
+                rows_out=int(row.get("rows_out") or 0),
+                message=str(row.get("message") or ""),
+                backend="databricks",
+            )
+
+        # The remote lifecycle is terminal only after the authoritative stage
+        # table has been projected. This prevents a completed run flashing back
+        # to RUNNING in the shared UI.
+        status = str(restored.get("status") or "").lower()
+        if status == "success":
+            runtime_state.finish_run(
+                run_id, "success", "Databricks Spark execution completed"
+            )
+        elif status == "failed":
+            runtime_state.finish_run(
+                run_id, "failed", "Databricks Spark execution failed"
+            )
+
+        return True
+    except Exception:
+        return False
+
+
+def _render_databricks_live_flow(restored: dict) -> None:
+    """Render the same stage-wise live UI used by Dashboard."""
+    run_id = str(restored.get("run_id") or "")
+    if _sync_databricks_runtime_state(restored):
+        live_flow.render(run_id)
 
 
 def _render_persistent_databricks_status(restored: dict):
@@ -556,40 +621,128 @@ def _render_persistent_databricks_status(restored: dict):
 
     dbx_status = restored.get("_dbx_status") or {}
 
-    dbx_run_id = str(
-        dbx_status.get("run_id")
-        or summary.get("dbx_run_id")
-        or ""
-    )
+    dbx_run_id = str(dbx_status.get("run_id") or summary.get("dbx_run_id") or "")
 
-    lifecycle = str(
-        dbx_status.get("life_cycle_state")
-        or "RUNNING"
-    )
+    lifecycle = str(dbx_status.get("life_cycle_state") or "RUNNING")
 
-    result_state = str(
-        dbx_status.get("result_state")
-        or ""
-    )
+    result_state = str(dbx_status.get("result_state") or "")
 
-    state_message = str(
-        dbx_status.get("state_message")
-        or ""
-    )
+    state_message = str(dbx_status.get("state_message") or "")
 
     lifecycle_upper = lifecycle.upper()
+    terminal_success = (
+        lifecycle_upper in ("TERMINATED", "SKIPPED")
+        and result_state.upper() == "SUCCESS"
+    )
+    terminal_failure = (
+        lifecycle_upper in ("TERMINATED", "SKIPPED", "INTERNAL_ERROR")
+        and not terminal_success
+    )
 
-    if lifecycle_upper in ("TERMINATED", "SKIPPED"):
-        if result_state.upper() == "SUCCESS":
-            active_stage = "gold"
-        else:
+    # --------------------------------------------------------
+    # AUTHORITATIVE LIVE STAGE STATE
+    #
+    # Do NOT infer the active stage from Databricks lifecycle.
+    # Databricks lifecycle only tells us whether the remote job
+    # is running/finished. The stage-status table tells us which
+    # actual pipeline stage is running.
+    # --------------------------------------------------------
+    # datadoctor_pipeline_status.run_id stores the internal DataDoctor
+    # pipeline run ID, not the Databricks job/run ID.
+    stage_rows = _get_databricks_stage_status(
+        str(restored.get("run_id") or ""),
+        summary.get("mode") or restored.get("mode") or "demo",
+    )
+
+    stage_order = (
+        "bronze",
+        "profiling",
+        "quality",
+        "repair",
+        "silver",
+        "gold",
+    )
+
+    stage_state_map = {}
+
+    for row in stage_rows:
+        stage = str(row.get("stage") or "").strip().lower()
+
+        if stage not in stage_order:
+            continue
+
+        stage_state_map[stage] = {
+            "state": str(row.get("state") or "waiting").strip().lower(),
+            "rows_in": int(row.get("rows_in") or 0),
+            "rows_out": int(row.get("rows_out") or 0),
+            "message": str(row.get("message") or ""),
+            "updated_at": row.get("updated_at"),
+        }
+
+    # Terminal SUCCESS only means the remote Spark job terminated successfully.
+    # Individual stage states remain authoritative from datadoctor_pipeline_status.
+    if terminal_success:
+        completed_run = all(
+            stage_state_map.get(stage, {}).get("state") == "success"
+            for stage in stage_order
+        )
+
+        active_stage = None
+
+        for stage in stage_order:
+            state = stage_state_map.get(stage, {}).get("state")
+            if state in ("running", "repairing", "retrying"):
+                active_stage = stage
+                completed_run = False
+                break
+
+    elif terminal_failure:
+        completed_run = False
+        active_stage = None
+
+        for stage in stage_order:
+            state = stage_state_map.get(stage, {}).get("state")
+            if state in ("failed", "running", "repairing", "retrying"):
+                active_stage = stage
+                break
+
+        if active_stage is None:
             active_stage = "quality"
+
     else:
-        active_stage = "bronze"
+        completed_run = False
+        active_stage = None
+
+        for stage in stage_order:
+            state = stage_state_map.get(stage, {}).get("state")
+            if state in ("running", "repairing", "retrying"):
+                active_stage = stage
+                break
+
+        if active_stage is None and not stage_state_map:
+            active_stage = "bronze"
+
+    def _stage_css(stage):
+        if completed_run:
+            return "complete"
+
+        info = stage_state_map.get(stage, {})
+        state = str(info.get("state") or "waiting").lower()
+
+        if state in ("running", "repairing", "retrying"):
+            return "active"
+
+        if state == "success":
+            return "complete"
+
+        if state == "failed":
+            return "failed"
+
+        return "waiting"
 
     st.divider()
 
-    components.html(
+    st.html(
         f"""
         <style>
 
@@ -698,7 +851,16 @@ def _render_persistent_databricks_status(restored: dict):
             box-shadow:
                 0 0 0 4px rgba(34,197,94,.10),
                 0 0 18px rgba(34,197,94,.75);
+        }}
+
+        .dd-live-dot.running {{
             animation: dd-pulse 1.5s ease-in-out infinite;
+        }}
+
+        .dd-live.completed {{
+            border-color: rgba(34,197,94,.25);
+            background: rgba(34,197,94,.06);
+            color: #86efac;
         }}
 
         @keyframes dd-pulse {{
@@ -861,6 +1023,11 @@ def _render_persistent_databricks_status(restored: dict):
                     transparent
                 );
             box-shadow: 0 0 10px #38bdf8;
+            opacity: 0;
+        }}
+
+        .dd-connector.flowing::after {{
+            opacity: 1;
             animation: dd-flow 1.5s linear infinite;
         }}
 
@@ -908,21 +1075,21 @@ def _render_persistent_databricks_status(restored: dict):
             <div class="dd-top">
 
                 <div class="dd-brand">
-                    <span class="dd-live-dot"></span>
+                    <span class="dd-live-dot {'running' if not completed_run else ''}"></span>
 
                     <div>
                         <div class="dd-title">
-                            DataDoctor AI · Live Pipeline
+                            DataDoctor AI · {'Pipeline Complete' if completed_run else 'Live Pipeline'}
                         </div>
 
                         <div class="dd-subtitle">
-                            Remote Spark execution · navigation safe
+                            {'Remote Spark execution · completed successfully' if completed_run else 'Remote Spark execution · live stage tracking'}
                         </div>
                     </div>
                 </div>
 
-                <div class="dd-live">
-                    ● LIVE
+                <div class="dd-live {'completed' if completed_run else ''}">
+                    {'✓ COMPLETED' if completed_run else '● LIVE'}
                 </div>
 
             </div>
@@ -937,7 +1104,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'bronze' else 'complete'}">
+                <div class="dd-stage {_stage_css("bronze")}">
                     <div class="dd-icon">B</div>
                     <div class="dd-name">BRONZE</div>
                     <div class="dd-detail">INGEST</div>
@@ -945,7 +1112,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'profiling' else ('complete' if active_stage in ('quality','repair','silver','gold') else '')}">
+                <div class="dd-stage {'active' if active_stage == 'profiling' else ('complete' if completed_run or active_stage in ('quality','repair','silver','gold') else '')}">
                     <div class="dd-icon">P</div>
                     <div class="dd-name">PROFILING</div>
                     <div class="dd-detail">ANALYZE</div>
@@ -953,7 +1120,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'quality' else ('complete' if active_stage in ('repair','silver','gold') else '')}">
+                <div class="dd-stage {'active' if active_stage == 'quality' else ('complete' if completed_run or active_stage in ('repair','silver','gold') else '')}">
                     <div class="dd-icon">Q</div>
                     <div class="dd-name">QUALITY</div>
                     <div class="dd-detail">VALIDATE</div>
@@ -961,7 +1128,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'repair' else ('complete' if active_stage in ('silver','gold') else '')}">
+                <div class="dd-stage {'active' if active_stage == 'repair' else ('complete' if completed_run or active_stage in ('silver','gold') else '')}">
                     <div class="dd-icon">AI</div>
                     <div class="dd-name">AI REPAIR</div>
                     <div class="dd-detail">REMEDIATE</div>
@@ -969,7 +1136,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'silver' else ('complete' if active_stage == 'gold' else '')}">
+                <div class="dd-stage {'active' if active_stage == 'silver' else ('complete' if completed_run or active_stage == 'gold' else '')}">
                     <div class="dd-icon">S</div>
                     <div class="dd-name">SILVER</div>
                     <div class="dd-detail">CLEAN</div>
@@ -977,7 +1144,7 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-connector"></div>
 
-                <div class="dd-stage {'active' if active_stage == 'gold' else ''}">
+                <div class="dd-stage {'active' if active_stage == 'gold' else ('complete' if completed_run else '')}">
                     <div class="dd-icon">G</div>
                     <div class="dd-name">GOLD</div>
                     <div class="dd-detail">SERVE</div>
@@ -989,7 +1156,9 @@ def _render_persistent_databricks_status(restored: dict):
 
                 <div class="dd-footer-live">
                     <span class="dd-mini"></span>
-                    <span>Databricks Spark execution active</span>
+                    <span>
+                        {'Databricks Spark execution completed' if completed_run else 'Databricks Spark execution active'}
+                    </span>
                 </div>
 
                 <span>Run {dbx_run_id}</span>
@@ -998,14 +1167,11 @@ def _render_persistent_databricks_status(restored: dict):
 
         </div>
         """,
-        height=245,
     )
 
     if lifecycle_upper in ("TERMINATED", "SKIPPED"):
         if result_state.upper() == "SUCCESS":
-            st.success(
-                f"Databricks run `{dbx_run_id}` completed successfully."
-            )
+            st.success(f"Databricks run `{dbx_run_id}` completed successfully.")
         else:
             st.warning(
                 f"Databricks run `{dbx_run_id}` finished with state "
@@ -1015,9 +1181,8 @@ def _render_persistent_databricks_status(restored: dict):
     if state_message:
         st.caption(state_message)
 
-    run_page_url = (
-        dbx_status.get("run_page_url")
-        or summary.get("databricks_run_page_url")
+    run_page_url = dbx_status.get("run_page_url") or summary.get(
+        "databricks_run_page_url"
     )
 
     if run_page_url:
@@ -1028,13 +1193,53 @@ def _render_persistent_databricks_status(restored: dict):
 
 
 def _restore_persistent_databricks_run(dataset_name: str, mode: str):
-    """Restore the newest Databricks run and authoritative stage state."""
+    """Restore only the active DataDoctor Databricks run for this Studio session.
+
+    Important UX rules:
+    - Never poll a completed run every second.
+    - Prefer the exact internal DataDoctor run started by this session.
+    - If the page was navigated away from, recover the newest persisted RUNNING
+      run for the selected dataset so execution remains visible.
+    - A completed run is returned once when requested, but it never keeps the
+      polling loop alive.
+    """
     import json
 
     try:
         runs = history.get_runs(limit=25)
-        for run in runs:
-            if str(run.get("dataset") or "") != str(dataset_name):
+        target_internal_id = str(
+            st.session_state.get("_active_dbx_internal_run_id") or ""
+        )
+
+        # First, restore the exact run this Studio session started.
+        candidates = runs
+        if target_internal_id:
+            candidates = [
+                r for r in runs if str(r.get("run_id") or "") == target_internal_id
+            ]
+
+        # If there is no exact session run, recover the newest persisted
+        # RUNNING Databricks run globally.  While a real pipeline is active,
+        # the active run owns the Studio execution area even if the user
+        # changes the dataset selector.  This prevents the selector from
+        # making a live run disappear.  Once the run becomes terminal, the
+        # active identity is cleared and the selector is free again.
+        if not candidates:
+            candidates = [
+                r for r in runs if str(r.get("status") or "").lower() == "running"
+            ]
+
+        for run in candidates:
+            # An exact session run may have a different dataset because the
+            # user changed the picker after starting it.  In that case it must
+            # still be restored; otherwise only consider the selected dataset.
+            if not target_internal_id and str(run.get("dataset") or "") != str(
+                dataset_name
+            ):
+                continue
+
+            persisted_status = str(run.get("status") or "").lower()
+            if persisted_status not in {"running", "success", "failed"}:
                 continue
 
             summary = run.get("summary") or {}
@@ -1047,18 +1252,38 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                 continue
 
             dbx_run_id = summary.get("dbx_run_id")
+
+            # Submission is still happening in the process-level worker. Keep
+            # the fragment alive until the worker persists the remote run ID.
             if not dbx_run_id:
+                if (
+                    persisted_status == "running"
+                    and str(run.get("run_id")) == target_internal_id
+                ):
+                    st.session_state.last_run_id = run["run_id"]
+                    st.session_state["_active_run_dataset"] = str(run.get("dataset") or summary.get("dataset") or dataset_name)
+                    return {
+                        **run,
+                        "summary": summary,
+                        "_dbx_status": {
+                            "run_id": "",
+                            "life_cycle_state": "PENDING",
+                            "result_state": "",
+                            "state_message": "Submitting Databricks Spark job…",
+                        },
+                        "_live": True,
+                    }
                 continue
 
             run_mode = summary.get("mode") or mode
             st.session_state.last_run_id = run["run_id"]
-            st.session_state.active_dataset = dataset_name
+            st.session_state["_active_run_dataset"] = str(run.get("dataset") or summary.get("dataset") or dataset_name)
 
             try:
-                from dbx_enterprise import jobs as dbx_jobs
                 dbx_status = dbx_jobs.get_run_status(str(dbx_run_id), mode=run_mode)
             except Exception as exc:
-                st.session_state.active_databricks_run_id = str(dbx_run_id)
+                # Temporary connectivity problems must not convert a real run
+                # into FAILED and must not trigger a full-page rerun.
                 return {
                     **run,
                     "summary": summary,
@@ -1068,7 +1293,7 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                         "result_state": "",
                         "state_message": f"Databricks status temporarily unavailable: {exc}",
                     },
-                    "_live": str(run.get("status") or "").lower() == "running",
+                    "_live": persisted_status == "running",
                     "_dbx_unreachable": True,
                 }
 
@@ -1077,6 +1302,7 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
 
             if lifecycle in {"PENDING", "RUNNING"}:
                 st.session_state.active_databricks_run_id = str(dbx_run_id)
+                st.session_state["_active_dbx_internal_run_id"] = str(run["run_id"])
                 return {
                     **run,
                     "summary": summary,
@@ -1085,7 +1311,7 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                 }
 
             if lifecycle == "TERMINATED" and result == "SUCCESS":
-                if str(run.get("status") or "").lower() != "success":
+                if persisted_status != "success":
                     history.finish_run(
                         run["run_id"],
                         "success",
@@ -1093,10 +1319,13 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                             **summary,
                             "result_state": result,
                             "life_cycle_state": lifecycle,
-                            "databricks_run_page_url": dbx_status.get("run_page_url", ""),
+                            "databricks_run_page_url": dbx_status.get(
+                                "run_page_url", ""
+                            ),
                         },
                     )
                 st.session_state.active_databricks_run_id = None
+                st.session_state["_active_dbx_internal_run_id"] = None
                 return {
                     **run,
                     "summary": summary,
@@ -1111,7 +1340,7 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                     or dbx_status.get("state_message")
                     or "Databricks job failed"
                 )
-                if str(run.get("status") or "").lower() != "failed":
+                if persisted_status != "failed":
                     history.finish_run(
                         run["run_id"],
                         "failed",
@@ -1121,10 +1350,13 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
                             "error": error,
                             "result_state": result,
                             "life_cycle_state": lifecycle,
-                            "databricks_run_page_url": dbx_status.get("run_page_url", ""),
+                            "databricks_run_page_url": dbx_status.get(
+                                "run_page_url", ""
+                            ),
                         },
                     )
                 st.session_state.active_databricks_run_id = None
+                st.session_state["_active_dbx_internal_run_id"] = None
                 return {
                     **run,
                     "summary": summary,
@@ -1138,51 +1370,255 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
         return None
 
 
+def _render_live_databricks_region(dataset_name: str, mode: str):
+    """Render the current persisted Databricks run state once.
+
+    Databricks stage-status data is authoritative. This function does not
+    schedule Streamlit reruns or start another Spark execution.
+    """
+    # A persisted active run always wins over the dataset picker.
+    # This prevents navigation back to Studio from switching the live run
+    # to the default dataset.
+def _active_persistent_databricks_dataset(mode: str):
+    """Return the dataset for the currently persisted active pipeline run."""
+    try:
+        from database import history
+
+        for saved_run in history.get_runs(limit=100):
+            status = str(saved_run.get("status") or "").strip().lower()
+
+            if status not in ("running", "queued", "pending"):
+                continue
+
+            summary = saved_run.get("summary") or {}
+
+            if isinstance(summary, str):
+                try:
+                    import json
+                    summary = json.loads(summary)
+                except Exception:
+                    summary = {}
+
+            if not isinstance(summary, dict):
+                summary = {}
+
+            dataset = str(
+                saved_run.get("dataset")
+                or summary.get("dataset")
+                or ""
+            ).strip()
+
+            if dataset:
+                return dataset
+
+    except Exception:
+        pass
+
+    return None
+
+
+    active_dataset = _active_persistent_databricks_dataset(mode)
+    effective_dataset = active_dataset or dataset_name
+
+    restored = _restore_persistent_databricks_run(
+        effective_dataset,
+        mode,
+    )
+
+    if not restored:
+        return False
+
+    run_id = str(restored["run_id"])
+    summary = restored.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {}
+
+    # The history record is the authoritative identity of the DataDoctor
+    # pipeline.  dbx_run_id is only the remote Databricks job identity.
+    run_dataset = str(restored.get("dataset") or summary.get("dataset") or dataset_name)
+    run_mode = str(summary.get("mode") or restored.get("mode") or mode)
+
+    st.session_state.last_run_id = run_id
+    st.session_state["_active_run_dataset"] = run_dataset
+
+    dbx_status = restored.get("_dbx_status") or {}
+    dbx_run_id = str(dbx_status.get("run_id") or summary.get("dbx_run_id") or "")
+    st.session_state.active_databricks_run_id = dbx_run_id or None
+
+    # Only show the execution flow when the selected dataset is the run dataset.
+    # Selecting another domain must not replace that domain's data with the active run.
+    if str(dataset_name).strip().lower() == str(run_dataset).strip().lower():
+        _render_databricks_live_flow(restored)
+
+    if str(restored.get("status") or "").lower() == "success" and str(dataset_name).strip().lower() == str(run_dataset).strip().lower():
+        loaded_for = st.session_state.get("_dbx_results_loaded_for")
+        if loaded_for != run_id:
+            try:
+                _populate_results_from_databricks(run_dataset, run_mode, run_id)
+                st.session_state["_dbx_results_loaded_for"] = run_id
+                st.session_state["_dbx_completed_restored"] = restored
+            except Exception as exc:
+                st.warning(
+                    f"Databricks completed, but result tables are not readable yet: {exc}"
+                )
+
+        # Render completed results for the same dataset/run only.
+        if (
+            st.session_state.get("gold_result")
+            and st.session_state.get("_dbx_results_loaded_for") == run_id
+        ):
+            st.session_state["_dbx_completed_restored"] = restored
+
+        if (
+            st.session_state.get("gold_result")
+            and st.session_state.get("_dbx_results_loaded_for") == run_id
+        ):
+            st.divider()
+            _render_results(run_dataset)
+
+    # Browser-side polling only.
+    # The Streamlit page is NOT rerun. The browser component polls
+    # ui.live_status_server every 2 seconds and updates only its own DOM.
+    try:
+        from ui.browser_live import render as render_browser_live
+        render_browser_live(run_id, run_mode, height=420)
+    except Exception as exc:
+        st.warning(f"Live browser status unavailable: {exc}")
+
+    return True
+
+
+def _find_existing_processed_run(dataset_name: str, mode: str):
+    """Return an already-successful native Databricks run for this dataset/mode.
+
+    Run Pipeline is intentionally idempotent for a dataset: once a dataset has
+    a successful Spark result, clicking Run Pipeline again must not submit a
+    second Spark run or rewrite the same processed tables.
+    """
+    import json
+
+    try:
+        runs = history.get_runs(limit=100)
+    except Exception:
+        return None
+
+    for run in runs:
+        if str(run.get("dataset") or "") != str(dataset_name):
+            continue
+        if str(run.get("status") or "").lower() != "success":
+            continue
+
+        summary = run.get("summary") or {}
+        if isinstance(summary, str):
+            try:
+                summary = json.loads(summary)
+            except Exception:
+                continue
+        if not isinstance(summary, dict):
+            continue
+
+        if str(summary.get("engine") or "").lower() != "databricks":
+            continue
+        if str(summary.get("mode") or mode).lower() != str(mode).lower():
+            continue
+        if not summary.get("dbx_run_id"):
+            continue
+
+        return {**run, "summary": summary}
+
+    return None
+
+
+def _show_existing_processed_run(run: dict, dataset_name: str, mode: str):
+    """Load/display existing Spark results without submitting another run."""
+    run_id = str(run.get("run_id") or "")
+    summary = run.get("summary") or {}
+    run_dataset = str(summary.get("dataset") or run.get("dataset") or dataset_name)
+    run_mode = str(summary.get("mode") or mode)
+
+    st.session_state.last_run_id = run_id
+    st.session_state["_active_run_dataset"] = run_dataset
+    st.session_state["_dbx_completed_restored"] = run
+
+    loaded_for = st.session_state.get("_dbx_results_loaded_for")
+    if loaded_for != run_id:
+        try:
+            _populate_results_from_databricks(run_dataset, run_mode, run_id)
+            st.session_state["_dbx_results_loaded_for"] = run_id
+        except Exception as exc:
+            st.warning(f"Existing Databricks results could not be loaded: {exc}")
+            return
+
+    st.info(
+        f"This dataset is already processed successfully (run {summary.get('dbx_run_id', run_id)}). "
+        "No new pipeline run was started."
+    )
+
+
 def render():
     st.title("🧪 Pipeline Studio")
     st.caption(
         "Ingest a dataset and watch it self-heal live: Bronze → Profiling → Quality → AI Repair → Silver → Gold."
     )
 
+    # ------------------------------------------------------------
+    # Navigation-safe active Databricks dataset.
+    #
+    # The persisted running pipeline wins over the picker's
+    # default dataset. This prevents returning to Studio from
+    # silently switching the UI back to another domain.
+    # ------------------------------------------------------------
+    mode = current_mode(load_settings())
+
+    _persisted_active_dataset = None
+
+    try:
+        _persisted_active_dataset = (
+            _active_persistent_databricks_dataset(mode)
+        )
+    except Exception:
+        _persisted_active_dataset = None
+
+    if _persisted_active_dataset:
+        # If the picker uses a Streamlit session-state key,
+        # preserve the active run's dataset for this page.
+        try:
+            st.session_state["studio_dataset"] = (
+                _persisted_active_dataset
+            )
+        except Exception:
+            pass
+
     dataset_name, df = dataset_picker(key_prefix="studio")
+
+    if _persisted_active_dataset:
+        # The persisted run is authoritative for the live execution
+        # view. Do not allow a stale/default picker value to replace it.
+        dataset_name = _persisted_active_dataset
+
     if df is None:
         st.stop()
 
-    st.session_state.active_dataset = dataset_name
-    mode = current_mode(load_settings())
-
-    restored = _restore_persistent_databricks_run(dataset_name, mode)
-
-    if restored:
-        st.session_state.last_run_id = restored["run_id"]
-        st.session_state.active_dataset = dataset_name
-
-        dbx_status = restored.get("_dbx_status") or {}
-        dbx_run_id = str(
-            dbx_status.get("run_id")
-            or (restored.get("summary") or {}).get("dbx_run_id")
-            or ""
+    # Show the real active run dataset instead of silently reverting
+    # the user to the picker's default while Spark is still running.
+    try:
+        _active_ui_dataset = _active_persistent_databricks_dataset(
+            current_mode(load_settings())
         )
-        st.session_state.active_databricks_run_id = dbx_run_id or None
 
-        # Render both RUNNING and terminal states. The renderer reads the
-        # authoritative datadoctor_pipeline_status Delta table.
-        _render_persistent_databricks_status(restored)
+        if _active_ui_dataset:
+            st.info(
+                f"Currently running: **{_active_ui_dataset}** ? "
+                "the live Databricks pipeline is preserved while you navigate."
+            )
+    except Exception:
+        pass
 
-        # On SUCCESS, load the real Bronze/Silver/Gold Spark tables once.
-        if str(restored.get("status") or "").lower() == "success":
-            loaded_for = st.session_state.get("_dbx_results_loaded_for")
-            if loaded_for != restored["run_id"]:
-                try:
-                    _populate_results_from_databricks(dataset_name, mode, restored["run_id"])
-                    st.session_state["_dbx_results_loaded_for"] = restored["run_id"]
-                except Exception as exc:
-                    st.warning(f"Databricks completed, but result tables are not readable yet: {exc}")
+    # The picker controls what a NEW run would execute.
 
-        # This is real polling, not a fake stage animation.
-        if restored.get("_live"):
-            time.sleep(1.0)
-            st.rerun()
+    # All Databricks polling/results live in a scoped fragment. This is the
+    # critical fix for the visible white-page refresh.
+    has_persistent_dbx_run = _render_live_databricks_region(dataset_name, mode)
 
     data_volume_bytes = df.memory_usage(deep=True).sum()
 
@@ -1205,24 +1641,62 @@ def render():
             "the primary Run Pipeline path submits exactly one Databricks run."
         )
     else:
-        st.caption("💾 No Databricks configured for this mode — running the in-app pipeline directly.")
+        st.caption(
+            "💾 No Databricks configured for this mode — running the in-app pipeline directly."
+        )
 
     if st.button("▶️ Run Pipeline", type="primary", use_container_width=True):
-        if databricks_ready:
+        # Never submit a second Spark run while one is already active.
+        active_internal = str(st.session_state.get("_active_dbx_internal_run_id") or "")
+        if databricks_ready and active_internal:
+            st.info(
+                "A Databricks pipeline is already running. Studio is showing its live status; "
+                "no second run was started."
+            )
+        elif databricks_ready:
+            # Every explicit Run Pipeline click starts a new run.
+            # Only the active-run guard above prevents duplicate execution.
             _run_orchestrated_pipeline(dataset_name, df, mode, explain_toggle)
-            st.rerun()
         else:
-            run_id = history.new_run(dataset_name)
-            runtime_state.create_run(run_id, dataset_name, mode="demo")
-            st.session_state.last_run_id = run_id
-            _execute_pipeline(dataset_name, df, run_id, explain_toggle)
+            existing_demo = None
+            try:
+                existing_demo = next(
+                    (
+                        r
+                        for r in history.get_runs(limit=100)
+                        if str(r.get("dataset") or "") == str(dataset_name)
+                        and str(r.get("status") or "").lower() == "success"
+                    ),
+                    None,
+                )
+            except Exception:
+                existing_demo = None
 
+            if existing_demo:
+                st.info(
+                    "This dataset is already processed. No new pipeline run was started."
+                )
+            else:
+                run_id = history.new_run(dataset_name)
+                runtime_state.create_run(run_id, dataset_name, mode="demo")
+                st.session_state.last_run_id = run_id
+                _execute_pipeline(dataset_name, df, run_id, explain_toggle)
+
+    # Local/demo execution keeps the existing result rendering. Native
+    # Databricks results are rendered by the scoped fragment above.
+    completed_restored = st.session_state.get("_dbx_completed_restored")
+    if not has_persistent_dbx_run and completed_restored:
+        _render_databricks_live_flow(completed_restored)
+
+    result_dataset = st.session_state.get("_dbx_result_dataset")
     if (
-        st.session_state.get("gold_result")
-        and st.session_state.get("active_dataset") == dataset_name
+        not has_persistent_dbx_run
+        and st.session_state.get("gold_result")
+        and result_dataset
+        and str(result_dataset) == str(dataset_name)
     ):
         st.divider()
-        _render_results(dataset_name)
+        _render_results(str(result_dataset))
 
     # Explicit/manual native path remains separate from primary Run Pipeline.
     _render_databricks_job_section(dataset_name, df)
@@ -1546,13 +2020,13 @@ def _render_databricks_job_section(dataset_name: str, df: pd.DataFrame):
                 _execute_pipeline(dataset_name, df, fallback_run_id, explain=True)
 
 
-
 def _render_results(dataset_name: str):
     st.subheader("📈 Results")
     silver_result = st.session_state.silver_result
     gold_result = st.session_state.gold_result
 
-    _render_animated_flow(dataset_name, silver_result, gold_result)
+    # The live glass pipeline above is the only execution animation.
+    # Results should remain static after completion; keep the Sankey for exact numbers.
     with st.expander("🔍 Exact flow numbers (Sankey)", expanded=False):
         _render_data_flow_diagram(dataset_name, silver_result, gold_result)
 
@@ -1574,8 +2048,4 @@ def _render_results(dataset_name: str):
             st.write(f"{icon} **{c['check_name']}**")
             if not c["passed"]:
                 st.json(c["details"])
-
-
-
-
 

@@ -110,16 +110,23 @@ def _finalize_table(full_table_name: str):
 from pyspark.sql import functions as F
 
 # Bronze: raw ingestion + metadata
-_publish_stage("bronze", "running", message="Ingesting raw data into Bronze")
-
 raw_df = spark.read.option("header", True).option("inferSchema", True).csv(source_path)
+
+# Get the real source row count before advertising Bronze RUNNING.
+bronze_count = raw_df.count()
+
+_publish_stage(
+    "bronze",
+    "running",
+    rows_in=bronze_count,
+    message=f"Ingesting {bronze_count:,} rows into Bronze",
+)
+
 bronze_df = raw_df.withColumn("_ingested_at", F.current_timestamp())
 
 bronze_table = f"{catalog}.{schema}.{bronze_prefix}__{dataset_name}"
 bronze_df.write.mode("overwrite").saveAsTable(bronze_table)
 _finalize_table(bronze_table)
-
-bronze_count = bronze_df.count()
 _publish_stage(
     "bronze",
     "success",

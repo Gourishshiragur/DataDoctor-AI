@@ -6,6 +6,8 @@ import time
 import pandas as pd
 import streamlit as st
 
+from ui.browser_live import render as render_browser_live
+
 from config.settings import current_mode, load_settings
 from database import history
 from storage import router as db
@@ -481,6 +483,7 @@ def _sync_persistent_databricks_runs():
             repr(exc),
         )
 
+
 def render():
     _sync_persistent_databricks_runs()
     # Reconcile abandoned local executions before calculating operational KPIs.
@@ -497,97 +500,29 @@ def render():
     settings = load_settings()
     mode = current_mode(settings)
 
+    # ========================================================
+    # ALWAYS-MOUNTED LIVE PIPELINE MONITOR
+    #
+    # The browser component stays mounted even when no pipeline
+    # is currently running. JavaScript discovers the active
+    # internal DataDoctorAI run through /active and then polls
+    # the real backend stage-status endpoint.
+    #
+    # No Streamlit rerun.
+    # No fragment.
+    # No page refresh.
+    # ========================================================
+    try:
+        render_browser_live(
+            "",
+            mode,
+            height=470,
+        )
+    except Exception:
+        # Live monitor must never prevent Dashboard rendering.
+        pass
+
     runs = history.get_runs(limit=100)
-
-    # ------------------------------------------------------------------
-    # LIVE PIPELINE STATE
-    # Databricks runs use the durable Databricks stage-status table and the
-    # same glass renderer as Pipeline Studio. Demo runs use local runtime_state.
-    # ------------------------------------------------------------------
-    if runs:
-        active_runs = [
-            r for r in runs
-            if str(r.get("status") or "").lower() == "running"
-        ]
-        latest_run = active_runs[0] if active_runs else runs[0]
-        latest_run_id = latest_run["run_id"]
-        persisted_status = str(latest_run.get("status") or "").lower()
-
-        import json
-        summary = latest_run.get("summary") or {}
-        if isinstance(summary, str):
-            try:
-                summary = json.loads(summary)
-            except Exception:
-                summary = {}
-
-        dbx_run_id = summary.get("dbx_run_id") if isinstance(summary, dict) else None
-        run_mode = (summary.get("mode") if isinstance(summary, dict) else None) or mode
-
-        if dbx_run_id:
-            try:
-                from dbx_enterprise import jobs as dbx_jobs
-                from ui.PipelineStudio import _render_persistent_databricks_status
-
-                dbx_status = dbx_jobs.get_run_status(str(dbx_run_id), mode=run_mode)
-                lifecycle = str(dbx_status.get("life_cycle_state") or "").upper()
-                result = str(dbx_status.get("result_state") or "").upper()
-
-                if lifecycle == "TERMINATED" and result == "SUCCESS":
-                    if persisted_status != "success":
-                        history.finish_run(
-                            latest_run_id,
-                            "success",
-                            {
-                                **summary,
-                                "result_state": result,
-                                "life_cycle_state": lifecycle,
-                                "databricks_run_page_url": dbx_status.get("run_page_url", ""),
-                            },
-                        )
-                    persisted_status = "success"
-                elif lifecycle in {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}:
-                    if persisted_status not in {"failed", "cancelled"}:
-                        history.finish_run(
-                            latest_run_id,
-                            "failed",
-                            {
-                                **summary,
-                                "reason": "databricks_job_failed",
-                                "error": (
-                                    dbx_status.get("error_message")
-                                    or dbx_status.get("state_message")
-                                    or "Databricks job failed"
-                                ),
-                                "result_state": result,
-                                "life_cycle_state": lifecycle,
-                            },
-                        )
-                    persisted_status = "failed"
-
-                restored = {
-                    **latest_run,
-                    "summary": summary,
-                    "status": persisted_status or "running",
-                    "_dbx_status": dbx_status,
-                    "_live": lifecycle in {"PENDING", "RUNNING"},
-                }
-
-                _render_persistent_databricks_status(restored)
-
-                if restored["_live"]:
-                    time.sleep(1.0)
-                    st.rerun()
-
-            except Exception as exc:
-                st.warning(f"Databricks live status temporarily unavailable: {exc}")
-        elif persisted_status == "running":
-            current_runtime = runtime_state.get_run(latest_run_id)
-            if current_runtime is None:
-                runtime_state.recover_run(latest_run_id)
-            live_flow.render(latest_run_id)
-            time.sleep(1.0)
-            st.rerun()
 
     total_runs = len(runs)
     success_runs, failed_runs, running_runs = _status_counts(runs)
@@ -717,7 +652,7 @@ def render():
             st.markdown("### Active Incident")
 
             with st.container(border=True):
-                st.error("🔴 Pipeline failure detected")
+                st.error("ðŸ”´ Pipeline failure detected")
 
                 st.markdown(
                     f"**Run `{html.escape(str(run_id))}` requires diagnosis and repair.**"
@@ -732,7 +667,7 @@ def render():
             st.markdown("### Incident Monitor")
 
             with st.container(border=True):
-                st.success("✓ All systems healthy")
+                st.success("âœ“ All systems healthy")
                 st.caption("No failed pipeline runs detected.")
 
     # ------------------------------------------------------------------
@@ -783,7 +718,7 @@ def render():
         )
 
         for table_name in tables:
-            with st.expander(f"📦 {table_name}"):
+            with st.expander(f"ðŸ“¦ {table_name}"):
                 try:
                     gdf = db.read_table("gold", table_name)
                     st.dataframe(
@@ -793,4 +728,3 @@ def render():
                     )
                 except Exception as exc:
                     st.warning(f"Could not load table: {exc}")
-
