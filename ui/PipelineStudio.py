@@ -1476,15 +1476,6 @@ def _active_persistent_databricks_dataset(mode: str):
             st.divider()
             _render_results(run_dataset)
 
-    # Browser-side polling only.
-    # The Streamlit page is NOT rerun. The browser component polls
-    # ui.live_status_server every 2 seconds and updates only its own DOM.
-    try:
-        from ui.browser_live import render as render_browser_live
-        render_browser_live(run_id, run_mode, height=420)
-    except Exception as exc:
-        st.warning(f"Live browser status unavailable: {exc}")
-
     return True
 
 

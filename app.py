@@ -8,13 +8,6 @@ Run with:  streamlit run app.py
 """
 import streamlit as st
 
-# Browser-side live Databricks status endpoint.
-try:
-    from ui import live_status_server
-    live_status_server.start()
-except Exception as exc:
-    live_status_server = None
-    print("WARNING: live status server unavailable:", repr(exc))
 import textwrap
 
 from config.demo import DEMO_MODE_NOTICE

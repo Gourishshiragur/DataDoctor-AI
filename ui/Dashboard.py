@@ -5,9 +5,6 @@ import time
 
 import pandas as pd
 import streamlit as st
-
-from ui.browser_live import render as render_browser_live
-
 from config.settings import current_mode, load_settings
 from database import history
 from storage import router as db
@@ -501,27 +498,6 @@ def render():
     mode = current_mode(settings)
 
     # ========================================================
-    # ALWAYS-MOUNTED LIVE PIPELINE MONITOR
-    #
-    # The browser component stays mounted even when no pipeline
-    # is currently running. JavaScript discovers the active
-    # internal DataDoctorAI run through /active and then polls
-    # the real backend stage-status endpoint.
-    #
-    # No Streamlit rerun.
-    # No fragment.
-    # No page refresh.
-    # ========================================================
-    try:
-        render_browser_live(
-            "",
-            mode,
-            height=470,
-        )
-    except Exception:
-        # Live monitor must never prevent Dashboard rendering.
-        pass
-
     runs = history.get_runs(limit=100)
 
     total_runs = len(runs)
