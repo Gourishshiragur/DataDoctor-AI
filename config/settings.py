@@ -22,8 +22,31 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _streamlit_secret(name: str, default: str = "") -> str:
+    """Read a Streamlit Cloud secret when available, otherwise environment."""
+    try:
+        import streamlit as st
+        value = st.secrets.get(name, "")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_PATH = ROOT_DIR / "database" / "app_settings.json"
+
+
+# Streamlit Cloud / deployment defaults.
+# Local database/app_settings.json still has priority through _deep_merge().
+_DBX_HOST = _streamlit_secret("DATABRICKS_HOST")
+_DBX_TOKEN = _streamlit_secret("DATABRICKS_TOKEN")
+_DBX_HTTP_PATH = _streamlit_secret("DATABRICKS_HTTP_PATH")
+_DBX_CLUSTER_ID = _streamlit_secret("DATABRICKS_CLUSTER_ID")
+_DBX_CATALOG = _streamlit_secret("DATABRICKS_CATALOG", "main")
+_DBX_SCHEMA = _streamlit_secret("DATABRICKS_SCHEMA", "default")
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "mode": "demo",  # "demo" or "enterprise" — user-pinned toggle in Settings
@@ -33,20 +56,20 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         # run against a customer's paid/production workspace. Kept as two independent
         # slots so switching modes never mixes the two up or requires re-entering keys.
         "demo": {
-            "workspace_url": os.getenv("DATABRICKS_DEMO_HOST", ""),
-            "token": os.getenv("DATABRICKS_DEMO_TOKEN", ""),
-            "http_path": os.getenv("DATABRICKS_DEMO_HTTP_PATH", ""),
-            "cluster_id": os.getenv("DATABRICKS_DEMO_CLUSTER_ID", ""),
-            "catalog": os.getenv("DATABRICKS_DEMO_CATALOG", "main"),
-            "schema": os.getenv("DATABRICKS_DEMO_SCHEMA", "demo"),
+            "workspace_url": _DBX_HOST or os.getenv("DATABRICKS_DEMO_HOST", ""),
+            "token": _DBX_TOKEN or os.getenv("DATABRICKS_DEMO_TOKEN", ""),
+            "http_path": _DBX_HTTP_PATH or os.getenv("DATABRICKS_DEMO_HTTP_PATH", ""),
+            "cluster_id": _DBX_CLUSTER_ID or os.getenv("DATABRICKS_DEMO_CLUSTER_ID", ""),
+            "catalog": _DBX_CATALOG or os.getenv("DATABRICKS_DEMO_CATALOG", "main"),
+            "schema": _DBX_SCHEMA or os.getenv("DATABRICKS_DEMO_SCHEMA", "demo"),
         },
         "enterprise": {
-            "workspace_url": os.getenv("DATABRICKS_HOST", ""),
-            "token": os.getenv("DATABRICKS_TOKEN", ""),
-            "http_path": os.getenv("DATABRICKS_HTTP_PATH", ""),
-            "cluster_id": os.getenv("DATABRICKS_CLUSTER_ID", ""),
-            "catalog": os.getenv("DATABRICKS_CATALOG", "main"),
-            "schema": os.getenv("DATABRICKS_SCHEMA", "enterprise"),
+            "workspace_url": _DBX_HOST,
+            "token": _DBX_TOKEN,
+            "http_path": _DBX_HTTP_PATH,
+            "cluster_id": _DBX_CLUSTER_ID,
+            "catalog": _DBX_CATALOG,
+            "schema": _DBX_SCHEMA or "enterprise",
         },
     },
     "pipeline": {
