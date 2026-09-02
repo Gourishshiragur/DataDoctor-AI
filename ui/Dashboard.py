@@ -628,7 +628,7 @@ def render():
             st.markdown("### Active Incident")
 
             with st.container(border=True):
-                st.error("ðŸ”´ Pipeline failure detected")
+                st.error("🔴 Pipeline failure detected")
 
                 st.markdown(
                     f"**Run `{html.escape(str(run_id))}` requires diagnosis and repair.**"
@@ -643,7 +643,7 @@ def render():
             st.markdown("### Incident Monitor")
 
             with st.container(border=True):
-                st.success("âœ“ All systems healthy")
+                st.success("✓ All systems healthy")
                 st.caption("No failed pipeline runs detected.")
 
     # ------------------------------------------------------------------
@@ -694,7 +694,7 @@ def render():
         )
 
         for table_name in tables:
-            with st.expander(f"ðŸ“¦ {table_name}"):
+            with st.expander(f"📦 {table_name}"):
                 try:
                     gdf = db.read_table("gold", table_name)
                     st.dataframe(
