@@ -17,39 +17,132 @@ from dbx_enterprise.connection import test_connection
 
 
 def _databricks_workspace_form(settings, mode: str, icon: str, blurb: str):
-    """Renders one workspace's credential form (Demo or Enterprise) — they're
-    independent slots so filling in one never touches the other."""
+    """Render one Databricks workspace configuration form.
+
+    Demo credentials are managed by the application/server and are never
+    exposed or editable by app users. Enterprise credentials remain editable.
+    """
     db_cfg = settings["databricks"][mode]
+
     st.markdown(f"#### {icon} {mode.title()} Workspace")
     st.caption(blurb)
+
+    if mode == "demo":
+        st.info(
+            "Demo Mode uses the application's managed Databricks Free Edition "
+            "connection. Authentication is kept server-side and the Personal "
+            "Access Token is never shown or editable here."
+        )
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.text_input(
+                "Workspace URL",
+                value=db_cfg.get("workspace_url", ""),
+                disabled=True,
+                key="demo_managed_workspace_url",
+            )
+            st.text_input(
+                "Catalog",
+                value=db_cfg.get("catalog", "main"),
+                disabled=True,
+                key="demo_managed_catalog",
+            )
+
+        with c2:
+            st.text_input(
+                "Authentication",
+                value="Managed server-side secret",
+                disabled=True,
+                key="demo_managed_auth",
+            )
+            st.text_input(
+                "Schema",
+                value=db_cfg.get("schema", "default"),
+                disabled=True,
+                key="demo_managed_schema",
+            )
+
+        st.text_input(
+            "HTTP Path",
+            value=db_cfg.get("http_path", ""),
+            disabled=True,
+            key="demo_managed_http_path",
+        )
+
+        if st.button("Test Databricks connection", key="demo_managed_test"):
+            if is_databricks_configured(settings, "demo"):
+                with st.spinner("Testing Demo Databricks connection..."):
+                    ok, msg = test_connection(mode="demo")
+                (st.success if ok else st.error)(msg)
+            else:
+                st.error(
+                    "Demo Databricks is not configured. The app owner must "
+                    "configure DATABRICKS_HOST, DATABRICKS_TOKEN and "
+                    "DATABRICKS_HTTP_PATH in Streamlit Secrets."
+                )
+
+        return
+
+    # Enterprise remains manually configurable.
     c1, c2 = st.columns(2)
+
     with c1:
         db_cfg["workspace_url"] = st.text_input(
-            "Workspace URL", value=db_cfg["workspace_url"],
-            placeholder="https://dbc-xxxxxxxx-xxxx.cloud.databricks.com", key=f"{mode}_url")
-        db_cfg["catalog"] = st.text_input("Catalog", value=db_cfg["catalog"], key=f"{mode}_catalog")
-        db_cfg["cluster_id"] = st.text_input("Cluster ID (optional)", value=db_cfg["cluster_id"], key=f"{mode}_cluster")
+            "Workspace URL",
+            value=db_cfg.get("workspace_url", ""),
+            placeholder="https://dbc-xxxxxxxx-xxxx.cloud.databricks.com",
+            key=f"{mode}_url",
+        )
+        db_cfg["catalog"] = st.text_input(
+            "Catalog",
+            value=db_cfg.get("catalog", "main"),
+            key=f"{mode}_catalog",
+        )
+        db_cfg["cluster_id"] = st.text_input(
+            "Cluster ID (optional)",
+            value=db_cfg.get("cluster_id", ""),
+            key=f"{mode}_cluster",
+        )
+
     with c2:
         db_cfg["token"] = st.text_input(
-            "Personal Access Token", value=db_cfg["token"], type="password", key=f"{mode}_token",
-            help=f"Currently: {mask(db_cfg['token']) or 'not set'}. Generate one under "
-                 "User Settings → Developer → Access Tokens in your Databricks workspace.")
-        db_cfg["schema"] = st.text_input("Schema", value=db_cfg["schema"], key=f"{mode}_schema")
+            "Personal Access Token",
+            value=db_cfg.get("token", ""),
+            type="password",
+            key=f"{mode}_token",
+            help=(
+                f"Currently: {mask(db_cfg.get('token', '')) or 'not set'}. "
+                "Generate one under User Settings -> Developer -> "
+                "Access Tokens in your Databricks workspace."
+            ),
+        )
+        db_cfg["schema"] = st.text_input(
+            "Schema",
+            value=db_cfg.get("schema", "default"),
+            key=f"{mode}_schema",
+        )
+
     db_cfg["http_path"] = st.text_input(
-        "HTTP Path (SQL Warehouse or cluster)", value=db_cfg["http_path"], key=f"{mode}_http_path",
+        "HTTP Path (SQL Warehouse or cluster)",
+        value=db_cfg.get("http_path", ""),
+        key=f"{mode}_http_path",
         placeholder="/sql/1.0/warehouses/xxxxxxxx",
-        help="SQL Warehouses → your warehouse → Connection Details. Required even if you "
-             "also filled in Cluster ID — the connector needs the HTTP Path either way.",
+        help=(
+            "SQL Warehouses -> your warehouse -> Connection Details. "
+            "Required for the SQL connector."
+        ),
     )
-    st.write("DEBUG:", db_cfg)
-    colA, colB = st.columns([1, 3])
-    if colA.button("Test connection", key=f"{mode}_test"):
+
+    if st.button("Test connection", key=f"{mode}_test"):
         if is_databricks_configured(settings, mode):
-            with st.spinner(f"Testing {mode.title()} workspace connection..."):
+            with st.spinner("Testing Enterprise workspace connection..."):
                 ok, msg = test_connection(mode=mode)
             (st.success if ok else st.error)(msg)
         else:
             st.warning("Fill in Workspace URL, Token, and HTTP Path first.")
+
 
 
 def render():
