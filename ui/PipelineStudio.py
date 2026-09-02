@@ -1370,15 +1370,6 @@ def _restore_persistent_databricks_run(dataset_name: str, mode: str):
         return None
 
 
-def _render_live_databricks_region(dataset_name: str, mode: str):
-    """Render the current persisted Databricks run state once.
-
-    Databricks stage-status data is authoritative. This function does not
-    schedule Streamlit reruns or start another Spark execution.
-    """
-    # A persisted active run always wins over the dataset picker.
-    # This prevents navigation back to Studio from switching the live run
-    # to the default dataset.
 def _active_persistent_databricks_dataset(mode: str):
     """Return the dataset for the currently persisted active pipeline run."""
     try:
@@ -1417,6 +1408,17 @@ def _active_persistent_databricks_dataset(mode: str):
     return None
 
 
+
+
+def _render_live_databricks_region(dataset_name: str, mode: str):
+    """Render the current persisted Databricks run state once.
+
+    Databricks stage-status data is authoritative. This function does not
+    schedule Streamlit reruns or start another Spark execution.
+    """
+    # A persisted active run always wins over the dataset picker.
+    # This prevents navigation back to Studio from switching the live run
+    # to the default dataset.
     active_dataset = _active_persistent_databricks_dataset(mode)
     effective_dataset = active_dataset or dataset_name
 
