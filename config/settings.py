@@ -23,16 +23,61 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _streamlit_secret(name: str, default: str = "") -> str:
-    """Read a Streamlit Cloud secret when available, otherwise environment."""
+def _streamlit_secret(name: str, default: str = "", mode: str = "") -> str:
+    """Read deployment secrets, supporting both flat and per-mode Streamlit layouts."""
     try:
         import streamlit as st
-        value = st.secrets.get(name, "")
-        if value:
-            return str(value)
+
+        # Preferred for separate Demo / Enterprise credentials:
+        # [databricks.demo] / [databricks.enterprise]
+        if mode:
+            try:
+                section = st.secrets.get("databricks", {})
+                if isinstance(section, dict):
+                    mode_section = section.get(mode, {})
+                    if isinstance(mode_section, dict):
+                        value = mode_section.get(name, "")
+                        if value:
+                            return str(value).strip()
+            except Exception:
+                pass
+
+        # Also support the existing flat layout:
+        # DATABRICKS_HOST = "..."
+        try:
+            value = st.secrets.get(name, "")
+            if value:
+                return str(value).strip()
+        except Exception:
+            pass
+
     except Exception:
         pass
-    return os.getenv(name, default)
+
+    return os.getenv(name, default).strip()
+
+
+def _deployment_databricks(mode: str) -> dict:
+    """Read Databricks deployment secrets at load time.
+
+    This is intentionally evaluated each time settings are loaded so Streamlit
+    Cloud secrets are available after a rerun/redeploy. Demo and Enterprise can
+    either use separate [databricks.<mode>] sections or the existing flat
+    DATABRICKS_* names.
+    """
+    prefix = "DATABRICKS_DEMO_" if mode == "demo" else "DATABRICKS_"
+
+    def value(name: str, default: str = "") -> str:
+        return _streamlit_secret(name, "", mode) or os.getenv(prefix + name.replace("DATABRICKS_", ""), default)
+
+    return {
+        "workspace_url": value("DATABRICKS_HOST"),
+        "token": value("DATABRICKS_TOKEN"),
+        "http_path": value("DATABRICKS_HTTP_PATH"),
+        "cluster_id": value("DATABRICKS_CLUSTER_ID"),
+        "catalog": value("DATABRICKS_CATALOG", "main"),
+        "schema": value("DATABRICKS_SCHEMA", "demo" if mode == "demo" else "enterprise"),
+    }
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -158,15 +203,39 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_settings() -> Dict[str, Any]:
-    """Load persisted settings, merged over defaults. Never raises."""
+    """Load persisted settings while filling empty fields from deployment secrets."""
+    result = deepcopy(DEFAULT_SETTINGS)
+
+    # Read Streamlit Cloud / environment secrets at runtime.
+    # This avoids stale module-import values and supports both workspace slots.
+    for mode in ("demo", "enterprise"):
+        deployed = _deployment_databricks(mode)
+        slot = result.setdefault("databricks", {}).setdefault(mode, {})
+        for key, value in deployed.items():
+            if value and not slot.get(key):
+                slot[key] = value
+
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, "r") as f:
                 saved = json.load(f)
-            return _deep_merge(DEFAULT_SETTINGS, saved)
+            result = _deep_merge(result, saved)
+
+            # Never allow a persisted blank value to erase a deployment secret.
+            deployed_all = {
+                mode: _deployment_databricks(mode)
+                for mode in ("demo", "enterprise")
+            }
+            for mode, deployed in deployed_all.items():
+                slot = result.setdefault("databricks", {}).setdefault(mode, {})
+                for key, value in deployed.items():
+                    if value and not slot.get(key):
+                        slot[key] = value
+
         except Exception:
             pass
-    return deepcopy(DEFAULT_SETTINGS)
+
+    return result
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
