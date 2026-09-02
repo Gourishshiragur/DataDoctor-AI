@@ -11,3 +11,5 @@ data/uploads/
 *.bak
 *.backup
 *.before-*
+
+database/app_settings.json
