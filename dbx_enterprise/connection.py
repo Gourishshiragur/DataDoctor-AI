@@ -47,8 +47,35 @@ def _get_connection(mode=None):
     print(cfg)
     print("=" * 80)
 
+    raw_host = str(cfg.get("workspace_url", "")).strip()
+
+    # Defensive normalization for Streamlit secrets / pasted values.
+    # Accept https://host, host, and accidental leading "$".
+    raw_host = raw_host.lstrip("$").strip()
+    if raw_host.startswith("https://"):
+        server_hostname = raw_host[len("https://"):]
+    elif raw_host.startswith("http://"):
+        server_hostname = raw_host[len("http://"):]
+    else:
+        server_hostname = raw_host
+
+    server_hostname = server_hostname.rstrip("/").strip()
+
+    if not server_hostname:
+        raise ValueError("Databricks workspace host is empty.")
+
+    if not cfg.get("token"):
+        raise ValueError("Databricks access token is empty.")
+
+    if not cfg.get("http_path"):
+        raise ValueError("Databricks HTTP path is empty.")
+
+    print("Databricks server hostname configured:", bool(server_hostname))
+    print("Databricks HTTP path configured:", bool(cfg.get("http_path")))
+    print("Databricks token configured:", bool(cfg.get("token")))
+
     conn = sql.connect(
-        server_hostname=cfg["workspace_url"].replace("https://", "").rstrip("/"),
+        server_hostname=server_hostname,
         http_path=cfg["http_path"],
         access_token=cfg["token"],
     )
